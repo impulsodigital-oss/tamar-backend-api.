@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg'); 
 const cors = require('cors'); 
-const bcrypt = require('bcrypt'); 
+const bcrypt = require('bcryptjs'); // AHORA USAMOS 'bcryptjs'
 const jwt = require('jsonwebtoken'); 
 const fetch = require('node-fetch'); // Importar fetch para hacer peticiones a la API de Brevo
 
@@ -322,3 +322,4 @@ app.listen(port, () => {
         console.warn("¡ADVERTENCIA! BREVO_API_KEY no está configurada. La sincronización de marketing está desactivada.");
     }
 });
+
