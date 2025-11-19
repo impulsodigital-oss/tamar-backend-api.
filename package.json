@@ -1,6 +1,13 @@
 {
   "name": "tamar-backend-api",
   "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
   "license": "ISC",
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -12,21 +19,3 @@
     "node-fetch": "^2.6.1"
   }
 }
-```eof
-
-### 2. Acciones Pendientes
-
-Una vez que guardes este archivo limpio en GitHub, Render iniciará un nuevo despliegue.
-
-* **Render:** El *Build* ya no fallará. El servidor se iniciará, y se instalarán `bcryptjs` y `node-fetch`.
-* **Base de Datos:** Ya que el servidor estará estable, el login fallará con `Email o contraseña incorrectos` si la tabla `usuarios` está vacía (o si `bcrypt` falla).
-
----
-
-## 🛑 Tarea Final: ¡Ejecución del Script SQL!
-
-Si tu `package.json` estaba mal, es posible que el script SQL aún no se haya ejecutado.
-
-**Debes ejecutar el script SQL completo en DBeaver en la BD `tamar_db_t7x2`.** Esto garantizará que la tabla `usuarios` exista y que el login funcione.
-
-**Por favor, limpia tu `package.json` en GitHub, y luego ejecuta el script SQL en DBeaver. Una vez que Render despliegue la nueva versión, tu prueba de registro/login debería funcionar al 100%.**
