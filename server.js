@@ -1,317 +1,247 @@
-// Cargar variables de entorno desde el archivo .env
+// server.js
+
+// Cargar variables de entorno
 require('dotenv').config();
 
 const express = require('express');
 const { Pool } = require('pg'); 
 const cors = require('cors'); 
-const bcrypt = require('bcryptjs'); // ¡CORRECTO! Usamos bcryptjs
+const bcrypt = require('bcryptjs'); 
 const jwt = require('jsonwebtoken'); 
 const fetch = require('node-fetch'); 
+
+// NUEVO MP: Importar SDK de Mercado Pago
+const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 
 const app = express();
 const port = process.env.PORT || 3000; 
 const jwtSecret = process.env.JWT_SECRET; 
 
-// CONFIGURACIÓN DE BREVO (Necesitas la variable BREVO_API_KEY en Render)
+// NUEVO MP: Configuración Cliente
+// Necesitas agregar MP_ACCESS_TOKEN en las variables de entorno de Render
+const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
+
+// CONFIGURACIÓN DE BREVO
 const BREVO_API_KEY = process.env.BREVO_API_KEY; 
 const LIST_ID_LEADS = 1; 
 const LIST_ID_ALUMNOS = 2; 
 
-
-// -------------------------------------------------------------------
-// --       FUNCIÓN DE SINCRONIZACIÓN BREVO                         -----
-// -------------------------------------------------------------------
-
+// ... (MANTÉN TU FUNCIÓN syncBrevoContact IGUAL QUE ANTES) ...
 async function syncBrevoContact(email, nombre, listId) {
-    if (!BREVO_API_KEY) {
-        console.warn('BREVO_API_KEY no configurada. Omitiendo sincronización con Brevo.');
-        return;
-    }
-
+    if (!BREVO_API_KEY) return;
     try {
         const response = await fetch('https://api.brevo.com/v3/contacts', {
             method: 'POST',
-            headers: {
-                // **ESTA CLAVE DEBE COINCIDIR EXACTAMENTE CON LA DE RENDER**
-                'api-key': BREVO_API_KEY, 
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                email: email,
-                listIds: [listId],
-                updateEnabled: true, 
-                attributes: {
-                    NOMBRE: nombre
-                }
-            })
+            headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, listIds: [listId], updateEnabled: true, attributes: { NOMBRE: nombre } })
         });
-
-        if (response.ok) {
-            console.log(`Contacto ${email} sincronizado con Brevo en la lista ${listId}.`);
-        } else {
-            const errorText = await response.text();
-            console.error(`Error al sincronizar con Brevo (Status ${response.status}): ${errorText}`);
-        }
-    } catch (error) {
-        console.error('Error de red al llamar a la API de Brevo:', error);
-    }
+    } catch (error) { console.error('Error Brevo:', error); }
 }
-
 
 // Middlewares
 app.use(express.json()); 
 app.use(cors()); 
 
-// Configuración de la conexión a la base de datos (usando la URL interna de Render)
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
-    }
+    ssl: { rejectUnauthorized: false }
 });
 
-// Probar la conexión a la base de datos
-pool.connect((err, client, release) => {
-    if (err) {
-        console.error('¡ADVERTENCIA! Error al conectar a la base de datos:', err.stack);
-        console.error('El servidor Express intentará iniciarse, pero las rutas de BD fallarán.');
-        return;
-    }
-    release();
-    console.log('Conexión exitosa a PostgreSQL (Render DB)!'); 
-});
-
-
-// -------------------------------------------------------------------
-// --        MIDDLEWARE DE AUTENTICACIÓN                          -----
-// -------------------------------------------------------------------
+// ... (MANTÉN TU MIDDLEWARE authenticateToken IGUAL QUE ANTES) ...
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Espera "Bearer TOKEN"
-
-    if (token == null) {
-        return res.status(401).json({ error: 'Acceso denegado. Token no proporcionado.' });
-    }
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token == null) return res.status(401).json({ error: 'Acceso denegado.' });
 
     jwt.verify(token, jwtSecret, (err, user) => {
-        if (err) {
-            return res.status(403).json({ error: 'Token inválido o expirado.' });
-        }
-        // Agrega el ID del usuario al objeto request para usarlo en las rutas protegidas
+        if (err) return res.status(403).json({ error: 'Token inválido.' });
         req.userId = user.id; 
         next();
     });
 };
 
+// RUTAS
 
-// -------------------------------------------------------------------
-// --        RUTAS PÚBLICAS                                       -----
-// -------------------------------------------------------------------
-
-// RUTA 1: Captura de Leads (Guía Gratuita)
+// RUTA 1: Leads (Igual que antes)
 app.post('/api/leads', async (req, res) => {
-    const { nombre, email } = req.body;
-
-    if (!nombre || !email) {
-        return res.status(400).json({ error: 'Nombre y email son obligatorios.' });
-    }
-
-    try {
-        let nuevoUsuarioId;
-
-        // 1. Insertar o actualizar Lead (ON CONFLICT maneja si el email ya existe)
-        const queryText = `
-            INSERT INTO usuarios (nombre, email, es_alumno_pago) 
-            VALUES ($1, $2, FALSE) 
-            ON CONFLICT (email) 
-            DO UPDATE SET nombre = EXCLUDED.nombre 
-            RETURNING id
-        `;
-        const result = await pool.query(queryText, [nombre, email]); 
-        nuevoUsuarioId = result.rows[0].id;
-        
-        // 2. Sincronizar con Brevo
-        await syncBrevoContact(email, nombre, LIST_ID_LEADS);
-
-        res.status(201).json({ 
-            message: 'Lead registrado exitosamente. Revisa tu email para la guía.',
-            userId: nuevoUsuarioId 
-        });
-
-    } catch (error) {
-        console.error('Error al registrar lead:', error.stack);
-        res.status(500).json({ error: 'Error interno del servidor.' });
-    }
+   // ... (Tu código original de leads va aquí, no cambia nada) ...
+   // Si quieres ahorrar espacio en este chat, asumo que mantienes el código original
+   // Solo asegúrate de que insertas con es_alumno_pago = FALSE (ya lo tenías así)
 });
 
-
-// RUTA 2: Registro de Alumno Pago
+// RUTA 2: Registro de Alumno (CORREGIDA)
 app.post('/api/registro', async (req, res) => {
     const { nombre, email, password } = req.body;
-
-    if (!nombre || !email || !password) {
-        return res.status(400).json({ error: 'Nombre, email y contraseña son obligatorios.' });
-    }
+    if (!nombre || !email || !password) return res.status(400).json({ error: 'Datos incompletos.' });
 
     try {
-        // 1. Verificar si el usuario ya existe
         const existingUser = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-        if (existingUser.rows.length > 0) {
-            return res.status(409).json({ error: 'El email ya está registrado.' });
-        }
+        if (existingUser.rows.length > 0) return res.status(409).json({ error: 'Email registrado.' });
 
-        // 2. Encriptar la contraseña (usando bcryptjs)
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        // 3. Insertar el nuevo alumno (es_alumno_pago = TRUE)
+        // CORRECCIÓN CRÍTICA: CAMBIADO TRUE A FALSE
+        // El usuario se registra pero NO ve videos hasta pagar
         const result = await pool.query(
-            'INSERT INTO usuarios (nombre, email, password_hash, es_alumno_pago) VALUES ($1, $2, $3, TRUE) RETURNING id',
+            'INSERT INTO usuarios (nombre, email, password_hash, es_alumno_pago) VALUES ($1, $2, $3, FALSE) RETURNING id',
             [nombre, email, hashedPassword]
         );
         const nuevoUsuarioId = result.rows[0].id;
-
-        // 4. Generar el token JWT
         const token = jwt.sign({ id: nuevoUsuarioId }, jwtSecret, { expiresIn: '7d' });
 
-        // 5. Sincronizar con Brevo 
-        await syncBrevoContact(email, nombre, LIST_ID_ALUMNOS);
+        // Opcional: Sincronizar con lista de LEADS (1) en lugar de ALUMNOS (2) hasta que paguen
+        await syncBrevoContact(email, nombre, LIST_ID_LEADS); 
 
         res.status(201).json({ 
-            message: 'Registro exitoso. Bienvenido a Tamar!',
+            message: 'Cuenta creada. Realiza el pago para acceder.',
             userId: nuevoUsuarioId,
-            token: token 
+            token: token,
+            requierePago: true // Flag para el frontend
         });
 
     } catch (error) {
-        console.error('Error al registrar usuario:', error.stack);
-        res.status(500).json({ error: 'Error interno del servidor.' });
+        console.error(error);
+        res.status(500).json({ error: 'Error servidor.' });
     }
 });
 
-
-// RUTA 3: Inicio de Sesión
+// RUTA 3: Login (Igual, pero aclaramos el mensaje del 403)
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-        return res.status(400).json({ error: 'Email y contraseña son obligatorios.' });
-    }
-
     try {
-        // 1. Buscar el usuario
         const result = await pool.query('SELECT id, password_hash, es_alumno_pago FROM usuarios WHERE email = $1', [email]);
         const user = result.rows[0];
 
-        if (!user || !user.password_hash) {
-            return res.status(401).json({ error: 'Email o contraseña incorrectos.' });
+        if (!user || !await bcrypt.compare(password, user.password_hash)) {
+            return res.status(401).json({ error: 'Credenciales incorrectas.' });
         }
 
-        // 2. Verificar la contraseña (usando bcryptjs.compare)
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-
-        if (!isMatch) {
-            return res.status(401).json({ error: 'Email o contraseña incorrectos.' });
-        }
-
-        // 3. Verificar si es alumno pago (IMPORTANTE: Esto causa el 403 si el usuario no es pago)
-        if (user.es_alumno_pago !== true) {
-             return res.status(403).json({ error: 'Tu cuenta no está activa para acceder a los cursos. Contacta a soporte.' });
-        }
-
-        // 4. Generar el token JWT
         const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
 
+        // Si NO pagó, devolvemos 200 pero con un aviso para que el frontend muestre el botón de pago
+        // NOTA: Modifiqué esto para no rechazar el login, sino permitir entrar y ver la pantalla de "Pagar"
+        if (user.es_alumno_pago !== true) {
+             return res.json({
+                message: 'Login exitoso. Pago pendiente.',
+                userId: user.id,
+                token: token,
+                requierePago: true // IMPORTANTE: El frontend leerá esto
+            });
+        }
+
         res.json({
-            message: 'Inicio de sesión exitoso.',
+            message: 'Bienvenido.',
             userId: user.id,
-            token: token
+            token: token,
+            requierePago: false
         });
 
+    } catch (error) { res.status(500).json({ error: 'Error interno.' }); }
+});
+
+// -------------------------------------------------------------------
+// -- NUEVO: RUTAS DE MERCADO PAGO -----------------------------------
+// -------------------------------------------------------------------
+
+// RUTA: Crear Preferencia de Pago
+app.post('/api/crear-pago', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.userId;
+        // Obtener email del usuario para MP
+        const userResult = await pool.query('SELECT email, nombre FROM usuarios WHERE id = $1', [userId]);
+        const user = userResult.rows[0];
+
+        const preference = new Preference(client);
+        
+        const result = await preference.create({
+            body: {
+                items: [
+                    {
+                        id: 'curso-tamar-completo',
+                        title: 'Acceso Completo - Escuela Tamar',
+                        quantity: 1,
+                        unit_price: 50000, // CAMBIAR POR TU PRECIO REAL (ARS para Argentina)
+                        currency_id: 'ARS' // O 'USD' si tu cuenta MP lo permite
+                    }
+                ],
+                payer: {
+                    email: user.email,
+                    name: user.nombre
+                },
+                back_urls: {
+                    success: 'https://tamarescuela.netlify.app/videos.html?status=success',
+                    failure: 'https://tamarescuela.netlify.app/videos.html?status=failure',
+                    pending: 'https://tamarescuela.netlify.app/videos.html?status=pending'
+                },
+                auto_return: 'approved',
+                notification_url: 'https://tamar-backend-api-gqy9.onrender.com/api/webhook/mercadopago', // URL DE TU BACKEND
+                metadata: {
+                    user_id: userId // IMPORTANTE: Para saber a quién activar cuando pague
+                }
+            }
+        });
+
+        res.json({ id: result.id, init_point: result.init_point }); // init_point es el link de pago
     } catch (error) {
-        console.error('Error durante el login:', error.stack);
-        res.status(500).json({ error: 'Error interno del servidor.' });
+        console.error(error);
+        res.status(500).json({ error: 'Error al crear preferencia de pago' });
     }
 });
 
-
-// -------------------------------------------------------------------
-// --        RUTAS PROTEGIDAS (Requieren Token JWT)               -----
-// -------------------------------------------------------------------
-
-// RUTA 4: Obtener lista de videos y progreso del usuario
-app.get('/api/videos', authenticateToken, async (req, res) => {
-    const userId = req.userId; // ID del usuario obtenido del token JWT
+// RUTA: Webhook (Donde MP avisa que pagaron)
+app.post('/api/webhook/mercadopago', async (req, res) => {
+    const topic = req.query.topic || req.query.type;
+    const paymentId = req.query.id || req.query['data.id'];
 
     try {
-        // 1. Obtener la lista completa de videos
-        const videosResult = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
-        const videos = videosResult.rows;
-
-        // 2. Obtener el progreso del usuario (IDs de videos completados)
-        const progresoResult = await pool.query(
-            'SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1',
-            [userId]
-        );
-        const completedVideoIds = new Set(progresoResult.rows.map(row => row.video_id));
-
-        // 3. Combinar los datos
-        const videosWithStatus = videos.map(video => ({
-            ...video,
-            completado: completedVideoIds.has(video.id)
-        }));
-
-        res.json({ videos: videosWithStatus });
-
-    } catch (error) {
-        console.error('Error al obtener videos:', error.stack);
-        res.status(500).json({ error: 'Error interno del servidor.' });
-    }
-});
-
-// RUTA 5: Marcar progreso de video
-app.post('/api/progreso', authenticateToken, async (req, res) => {
-    const userId = req.userId;
-    const { videoId } = req.body;
-
-    if (!videoId) {
-        return res.status(400).json({ error: 'El ID del video es obligatorio.' });
-    }
-
-    try {
-        // La restricción UNIQUE en la BD maneja el caso de duplicados
-        const result = await pool.query(
-            'INSERT INTO progreso_alumnos (usuario_id, video_id, fecha_completado) VALUES ($1, $2, NOW()) RETURNING id',
-            [userId, videoId]
-        );
-        console.log(`Usuario ${userId} marcó el video ${videoId} como completado.`);
-        res.status(201).json({ message: 'Progreso registrado exitosamente.', progresoId: result.rows[0].id });
-
-    } catch (error) {
-        // Manejar el caso de que el video ya esté marcado como completado
-        if (error.code === '23505' && error.constraint === 'progreso_alumnos_usuario_id_video_id_key') {
-            return res.status(409).json({ error: 'Este video ya ha sido marcado como completado por este usuario.' });
+        if (topic === 'payment') {
+            const payment = new Payment(client);
+            const paymentInfo = await payment.get({ id: paymentId });
+            
+            if (paymentInfo.status === 'approved') {
+                const userId = paymentInfo.metadata.user_id; // Recuperamos el ID que enviamos antes
+                
+                if (userId) {
+                    // ACTIVAR ALUMNO EN BASE DE DATOS
+                    const result = await pool.query(
+                        'UPDATE usuarios SET es_alumno_pago = TRUE WHERE id = $1 RETURNING email, nombre',
+                        [userId]
+                    );
+                    
+                    // MOVER A LISTA DE ALUMNOS (2) EN BREVO
+                    if (result.rows.length > 0) {
+                        const { email, nombre } = result.rows[0];
+                        await syncBrevoContact(email, nombre, LIST_ID_ALUMNOS);
+                        console.log(`Pago aprobado para usuario ${userId}. Activado.`);
+                    }
+                }
+            }
         }
-        console.error('Error al registrar progreso:', error.stack);
-        res.status(500).json({ error: 'Error interno del servidor.' });
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('Error webhook:', error);
+        res.sendStatus(500);
     }
 });
 
+// ... (TUS RUTAS DE VIDEOS Y PROGRESO SIGUEN IGUAL) ...
+// Solo recuerda que authenticateToken ya no bloqueará en el login, 
+// pero SÍ debes mantener el bloqueo en /api/videos si user.es_alumno_pago es false.
 
-// -------------------------------------------------------------------
-// --        INICIO DEL SERVIDOR                                  -----
-// -------------------------------------------------------------------
-app.listen(port, () => {
-    console.log(`Servidor backend de Tamar corriendo en http://localhost:${port}`);
+app.get('/api/videos', authenticateToken, async (req, res) => {
+    const userId = req.userId;
     
-    // Verificación de variables clave
-    if (!process.env.DATABASE_URL) {
-        console.error("¡ALERTA! DATABASE_URL no está configurada.");
+    // VERIFICACIÓN DE SEGURIDAD EXTRA
+    const userCheck = await pool.query('SELECT es_alumno_pago FROM usuarios WHERE id = $1', [userId]);
+    if (!userCheck.rows[0].es_alumno_pago) {
+        return res.status(403).json({ error: 'Debes comprar el curso para ver los videos.', requierePago: true });
     }
-    if (!process.env.JWT_SECRET) {
-        console.error("¡ALERTA! JWT_SECRET no está configurada.");
-    }
-    if (!BREVO_API_KEY) {
-        console.warn("¡ADVERTENCIA! BREVO_API_KEY no está configurada. La sincronización de marketing está desactivada.");
-    }
+
+    // ... (El resto de tu lógica de videos sigue igual) ...
+    // ...
 });
 
+// ... (Resto del archivo y app.listen) ...
+app.listen(port, () => {
+    console.log(`Servidor corriendo en puerto ${port}`);
+});
