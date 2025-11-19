@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg'); 
 const cors = require('cors'); 
-const bcrypt = require('bcryptjs'); // ¡CORRECCIÓN! Usamos bcryptjs
+const bcrypt = require('bcryptjs'); // ¡CORRECTO! Usamos bcryptjs
 const jwt = require('jsonwebtoken'); 
 const fetch = require('node-fetch'); 
 
@@ -19,7 +19,7 @@ const LIST_ID_ALUMNOS = 2;
 
 
 // -------------------------------------------------------------------
-// --        FUNCIÓN DE SINCRONIZACIÓN BREVO                       -----
+// --       FUNCIÓN DE SINCRONIZACIÓN BREVO                         -----
 // -------------------------------------------------------------------
 
 async function syncBrevoContact(email, nombre, listId) {
@@ -32,7 +32,8 @@ async function syncBrevoContact(email, nombre, listId) {
         const response = await fetch('https://api.brevo.com/v3/contacts', {
             method: 'POST',
             headers: {
-                'api-key': BREVO_API_KEY,
+                // **ESTA CLAVE DEBE COINCIDIR EXACTAMENTE CON LA DE RENDER**
+                'api-key': BREVO_API_KEY, 
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
@@ -82,7 +83,7 @@ pool.connect((err, client, release) => {
 
 
 // -------------------------------------------------------------------
-// --        MIDDLEWARE DE AUTENTICACIÓN                           -----
+// --        MIDDLEWARE DE AUTENTICACIÓN                          -----
 // -------------------------------------------------------------------
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
@@ -104,7 +105,7 @@ const authenticateToken = (req, res, next) => {
 
 
 // -------------------------------------------------------------------
-// --        RUTAS PÚBLICAS                                        -----
+// --        RUTAS PÚBLICAS                                       -----
 // -------------------------------------------------------------------
 
 // RUTA 1: Captura de Leads (Guía Gratuita)
@@ -212,7 +213,7 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'Email o contraseña incorrectos.' });
         }
 
-        // 3. Verificar si es alumno pago
+        // 3. Verificar si es alumno pago (IMPORTANTE: Esto causa el 403 si el usuario no es pago)
         if (user.es_alumno_pago !== true) {
              return res.status(403).json({ error: 'Tu cuenta no está activa para acceder a los cursos. Contacta a soporte.' });
         }
@@ -234,7 +235,7 @@ app.post('/api/login', async (req, res) => {
 
 
 // -------------------------------------------------------------------
-// --        RUTAS PROTEGIDAS (Requieren Token JWT)                -----
+// --        RUTAS PROTEGIDAS (Requieren Token JWT)               -----
 // -------------------------------------------------------------------
 
 // RUTA 4: Obtener lista de videos y progreso del usuario
@@ -297,7 +298,7 @@ app.post('/api/progreso', authenticateToken, async (req, res) => {
 
 
 // -------------------------------------------------------------------
-// --        INICIO DEL SERVIDOR                                 -----
+// --        INICIO DEL SERVIDOR                                  -----
 // -------------------------------------------------------------------
 app.listen(port, () => {
     console.log(`Servidor backend de Tamar corriendo en http://localhost:${port}`);
@@ -313,3 +314,4 @@ app.listen(port, () => {
         console.warn("¡ADVERTENCIA! BREVO_API_KEY no está configurada. La sincronización de marketing está desactivada.");
     }
 });
+
