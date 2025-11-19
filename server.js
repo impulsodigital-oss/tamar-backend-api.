@@ -4,25 +4,24 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg'); 
 const cors = require('cors'); 
-const bcrypt = require('bcryptjs'); // AHORA USAMOS 'bcryptjs'
+const bcrypt = require('bcryptjs'); // ¡CORRECCIÓN! Usamos bcryptjs
 const jwt = require('jsonwebtoken'); 
-const fetch = require('node-fetch'); // Importar fetch para hacer peticiones a la API de Brevo
+const fetch = require('node-fetch'); 
 
 const app = express();
-const port = process.env.PORT; 
+const port = process.env.PORT || 3000; 
 const jwtSecret = process.env.JWT_SECRET; 
 
-// CONFIGURACIÓN DE BREVO
+// CONFIGURACIÓN DE BREVO (Necesitas la variable BREVO_API_KEY en Render)
 const BREVO_API_KEY = process.env.BREVO_API_KEY; 
-const LIST_ID_LEADS = 1; // ID de tu lista de Leads (¡CAMBIA ESTO!)
-const LIST_ID_ALUMNOS = 2; // ID de tu lista de Alumnos Pagos (¡CAMBIA ESTO!)
+const LIST_ID_LEADS = 1; 
+const LIST_ID_ALUMNOS = 2; 
 
 
 // -------------------------------------------------------------------
 // --        FUNCIÓN DE SINCRONIZACIÓN BREVO                       -----
 // -------------------------------------------------------------------
 
-// Función para añadir o actualizar un contacto en Brevo (Lista de Leads o Alumnos)
 async function syncBrevoContact(email, nombre, listId) {
     if (!BREVO_API_KEY) {
         console.warn('BREVO_API_KEY no configurada. Omitiendo sincronización con Brevo.');
@@ -39,10 +38,9 @@ async function syncBrevoContact(email, nombre, listId) {
             body: JSON.stringify({
                 email: email,
                 listIds: [listId],
-                updateEnabled: true, // Si ya existe, actualiza
+                updateEnabled: true, 
                 attributes: {
-                    // Asegúrate de que 'NOMBRE' sea el nombre de atributo que usas en Brevo
-                    NOMBRE: nombre 
+                    NOMBRE: nombre
                 }
             })
         });
@@ -50,7 +48,6 @@ async function syncBrevoContact(email, nombre, listId) {
         if (response.ok) {
             console.log(`Contacto ${email} sincronizado con Brevo en la lista ${listId}.`);
         } else {
-            // Intenta obtener más detalles del error de Brevo
             const errorText = await response.text();
             console.error(`Error al sincronizar con Brevo (Status ${response.status}): ${errorText}`);
         }
@@ -64,7 +61,7 @@ async function syncBrevoContact(email, nombre, listId) {
 app.use(express.json()); 
 app.use(cors()); 
 
-// Configuración de la conexión a la base de datos
+// Configuración de la conexión a la base de datos (usando la URL interna de Render)
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
@@ -80,13 +77,13 @@ pool.connect((err, client, release) => {
         return;
     }
     release();
-    console.log('Conexión exitosa a PostgreSQL (Render)!');
+    console.log('Conexión exitosa a PostgreSQL (Render DB)!'); 
 });
 
 
-// -------------------------------------------------------------------\r\n
-// --        MIDDLEWARE DE AUTENTICACIÓN                           -----\r\n
-// -------------------------------------------------------------------\r\n
+// -------------------------------------------------------------------
+// --        MIDDLEWARE DE AUTENTICACIÓN                           -----
+// -------------------------------------------------------------------
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; // Espera "Bearer TOKEN"
@@ -106,9 +103,9 @@ const authenticateToken = (req, res, next) => {
 };
 
 
-// -------------------------------------------------------------------\r\n
-// --        RUTAS PÚBLICAS                                        -----\r\n
-// -------------------------------------------------------------------\r\n
+// -------------------------------------------------------------------
+// --        RUTAS PÚBLICAS                                        -----
+// -------------------------------------------------------------------
 
 // RUTA 1: Captura de Leads (Guía Gratuita)
 app.post('/api/leads', async (req, res) => {
@@ -119,26 +116,20 @@ app.post('/api/leads', async (req, res) => {
     }
 
     try {
-        // 1. Verificar si el email ya existe en la tabla usuarios (como lead o alumno)
-        const checkUser = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
         let nuevoUsuarioId;
 
-        if (checkUser.rows.length === 0) {
-            // 2. Si no existe, insertarlo como nuevo lead (es_alumno_pago = FALSE)
-            const result = await pool.query(
-                'INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) RETURNING id',
-                [nombre, email]
-            );
-            nuevoUsuarioId = result.rows[0].id;
-        } else {
-            // Si ya existe, simplemente obtenemos su ID para el log
-            nuevoUsuarioId = checkUser.rows[0].id;
-        }
-
-        // 3. Registrar la interacción como Lead (opcional, pero útil para historial de marketing)
-        await pool.query('INSERT INTO leads (nombre, email) VALUES ($1, $2)', [nombre, email]);
+        // 1. Insertar o actualizar Lead (ON CONFLICT maneja si el email ya existe)
+        const queryText = `
+            INSERT INTO usuarios (nombre, email, es_alumno_pago) 
+            VALUES ($1, $2, FALSE) 
+            ON CONFLICT (email) 
+            DO UPDATE SET nombre = EXCLUDED.nombre 
+            RETURNING id
+        `;
+        const result = await pool.query(queryText, [nombre, email]); 
+        nuevoUsuarioId = result.rows[0].id;
         
-        // 4. Sincronizar con Brevo para iniciar el email de la guía gratuita
+        // 2. Sincronizar con Brevo
         await syncBrevoContact(email, nombre, LIST_ID_LEADS);
 
         res.status(201).json({ 
@@ -163,12 +154,12 @@ app.post('/api/registro', async (req, res) => {
 
     try {
         // 1. Verificar si el usuario ya existe
-        const existingUser = await pool.query('SELECT * FROM usuarios WHERE email = $1', [email]);
+        const existingUser = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
         if (existingUser.rows.length > 0) {
             return res.status(409).json({ error: 'El email ya está registrado.' });
         }
 
-        // 2. Encriptar la contraseña
+        // 2. Encriptar la contraseña (usando bcryptjs)
         const hashedPassword = await bcrypt.hash(password, 10);
         
         // 3. Insertar el nuevo alumno (es_alumno_pago = TRUE)
@@ -181,7 +172,7 @@ app.post('/api/registro', async (req, res) => {
         // 4. Generar el token JWT
         const token = jwt.sign({ id: nuevoUsuarioId }, jwtSecret, { expiresIn: '7d' });
 
-        // 5. Sincronizar con Brevo para iniciar la secuencia de emails de bienvenida al alumno
+        // 5. Sincronizar con Brevo 
         await syncBrevoContact(email, nombre, LIST_ID_ALUMNOS);
 
         res.status(201).json({ 
@@ -214,14 +205,14 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'Email o contraseña incorrectos.' });
         }
 
-        // 2. Verificar la contraseña
+        // 2. Verificar la contraseña (usando bcryptjs.compare)
         const isMatch = await bcrypt.compare(password, user.password_hash);
 
         if (!isMatch) {
             return res.status(401).json({ error: 'Email o contraseña incorrectos.' });
         }
 
-        // 3. Verificar si es alumno pago (acceso a videos)
+        // 3. Verificar si es alumno pago
         if (user.es_alumno_pago !== true) {
              return res.status(403).json({ error: 'Tu cuenta no está activa para acceder a los cursos. Contacta a soporte.' });
         }
@@ -242,9 +233,9 @@ app.post('/api/login', async (req, res) => {
 });
 
 
-// -------------------------------------------------------------------\r\n
-// --        RUTAS PROTEGIDAS (Requieren Token JWT)                -----\r\n
-// -------------------------------------------------------------------\r\n
+// -------------------------------------------------------------------
+// --        RUTAS PROTEGIDAS (Requieren Token JWT)                -----
+// -------------------------------------------------------------------
 
 // RUTA 4: Obtener lista de videos y progreso del usuario
 app.get('/api/videos', authenticateToken, async (req, res) => {
@@ -252,7 +243,7 @@ app.get('/api/videos', authenticateToken, async (req, res) => {
 
     try {
         // 1. Obtener la lista completa de videos
-        const videosResult = await pool.query('SELECT * FROM videos ORDER BY id ASC');
+        const videosResult = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
         const videos = videosResult.rows;
 
         // 2. Obtener el progreso del usuario (IDs de videos completados)
@@ -295,7 +286,7 @@ app.post('/api/progreso', authenticateToken, async (req, res) => {
         res.status(201).json({ message: 'Progreso registrado exitosamente.', progresoId: result.rows[0].id });
 
     } catch (error) {
-        // Manejar el caso de que el video ya esté marcado como completado (código de error de PostgreSQL 23505 para duplicados)
+        // Manejar el caso de que el video ya esté marcado como completado
         if (error.code === '23505' && error.constraint === 'progreso_alumnos_usuario_id_video_id_key') {
             return res.status(409).json({ error: 'Este video ya ha sido marcado como completado por este usuario.' });
         }
@@ -322,4 +313,3 @@ app.listen(port, () => {
         console.warn("¡ADVERTENCIA! BREVO_API_KEY no está configurada. La sincronización de marketing está desactivada.");
     }
 });
-
