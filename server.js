@@ -6,8 +6,7 @@ const { Pool } = require('pg');
 const cors = require('cors'); 
 const bcrypt = require('bcrypt'); 
 const jwt = require('jsonwebtoken'); 
-// Se utiliza 'node-fetch' para hacer la petición a la API externa de Brevo
-const fetch = require('node-fetch'); 
+const fetch = require('node-fetch'); // Módulo requerido para la API de Brevo
 
 const app = express();
 const port = process.env.PORT || 3000; 
@@ -40,9 +39,9 @@ async function syncBrevoContact(email, nombre, listId) {
             body: JSON.stringify({
                 email: email,
                 listIds: [listId],
-                updateEnabled: true, // Si ya existe el contacto, lo actualiza
+                updateEnabled: true, 
                 attributes: {
-                    NOMBRE: nombre // Usamos un atributo NOMBRE, asegúrate de que exista en Brevo
+                    NOMBRE: nombre
                 }
             })
         });
@@ -79,7 +78,6 @@ pool.connect((err, client, release) => {
         return;
     }
     release();
-    // Mantenemos el log de éxito, pero apuntando a la nueva BD
     console.log('Conexión exitosa a PostgreSQL (Render DB)!'); 
 });
 
@@ -99,8 +97,8 @@ function authenticateToken(req, res, next) {
         if (err) {
             return res.status(403).json({ error: 'Token inválido o expirado.' });
         }
-        // Asume que el token tiene el ID del usuario como 'id' o 'userId'
-        req.userId = user.id || user.userId; 
+        // Asume que el token tiene el ID del usuario como 'id'
+        req.userId = user.id; 
         next();
     });
 }
@@ -119,24 +117,20 @@ app.post('/api/leads', async (req, res) => {
     }
 
     try {
-        // 1. Intentar insertar el nuevo lead (es_alumno_pago = FALSE)
-        try {
-            const result = await pool.query(
-                'INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id',
-                [nombre, email]
-            );
-            nuevoUsuarioId = result.rows[0].id;
+        let nuevoUsuarioId;
 
-        } catch (error) {
-            if (error.code === '23505') { // Si hay conflicto, solo obtenemos el ID existente
-                const existingUser = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-                nuevoUsuarioId = existingUser.rows[0].id;
-            } else {
-                 throw error;
-            }
-        }
+        // 1. Intentar insertar el nuevo lead, actualizar si ya existe
+        const queryText = `
+            INSERT INTO usuarios (nombre, email, es_alumno_pago) 
+            VALUES ($1, $2, FALSE) 
+            ON CONFLICT (email) 
+            DO UPDATE SET nombre = EXCLUDED.nombre 
+            RETURNING id
+        `;
+        const result = await pool.query(queryText, [nombre, email]);
+        nuevoUsuarioId = result.rows[0].id;
         
-        // 2. Sincronizar con Brevo para iniciar el email de la guía gratuita
+        // 2. Sincronizar con Brevo
         await syncBrevoContact(email, nombre, LIST_ID_LEADS);
 
         res.status(201).json({ 
@@ -176,10 +170,10 @@ app.post('/api/registro', async (req, res) => {
         );
         const nuevoUsuarioId = result.rows[0].id;
 
-        // 4. Generar el token JWT
+        // 4. Generar el token JWT (firmamos con 'id')
         const token = jwt.sign({ id: nuevoUsuarioId }, jwtSecret, { expiresIn: '7d' });
 
-        // 5. Sincronizar con Brevo para secuencia de emails de bienvenida
+        // 5. Sincronizar con Brevo 
         await syncBrevoContact(email, nombre, LIST_ID_ALUMNOS);
 
         res.status(201).json({ 
