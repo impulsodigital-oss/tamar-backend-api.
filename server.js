@@ -23,6 +23,8 @@ const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN 
 // 2. PAYPAL (Internacional)
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
+// Cambiar a 'https://api-m.paypal.com' para PRODUCCIÓN (cuando lancen de verdad)
+// Usar 'https://api-m.sandbox.paypal.com' para PRUEBAS
 const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com'; 
 
 // CONFIGURACIÓN DE BREVO
