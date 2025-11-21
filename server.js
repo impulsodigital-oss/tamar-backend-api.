@@ -23,8 +23,6 @@ const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN 
 // 2. PAYPAL (Internacional)
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
-// Cambiar a 'https://api-m.paypal.com' para PRODUCCIÓN (cuando lancen de verdad)
-// Usar 'https://api-m.sandbox.paypal.com' para PRUEBAS
 const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com'; 
 
 // CONFIGURACIÓN DE BREVO
@@ -79,26 +77,34 @@ const pool = new Pool({
 pool.connect(async (err, client, release) => {
     if (err) { console.error('Error DB:', err.stack); return; }
     try {
+        // Tabla de Videos
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS videos (
+                id SERIAL PRIMARY KEY,
+                titulo_completo VARCHAR(255) NOT NULL,
+                titulo_corto VARCHAR(100),
+                modulo INT,
+                orden INT,
+                url_video TEXT,
+                descripcion TEXT
+            );
+        `);
+
+        // Tabla de Clases en Vivo (Con Materia y Recursos)
         await client.query(`
             CREATE TABLE IF NOT EXISTS clases_en_vivo (
                 id SERIAL PRIMARY KEY,
                 titulo VARCHAR(255) NOT NULL,
+                materia VARCHAR(100),
                 profesor VARCHAR(100),
                 fecha_hora TIMESTAMP NOT NULL,
                 link_zoom TEXT,
+                link_recursos TEXT,
                 descripcion TEXT
             );
         `);
         console.log('✅ DB Inicializada.');
         
-        // Insertar datos de prueba si está vacío
-        const checkData = await client.query('SELECT COUNT(*) FROM clases_en_vivo');
-        if (parseInt(checkData.rows[0].count) === 0) {
-            await client.query(`
-                INSERT INTO clases_en_vivo (titulo, profesor, fecha_hora, link_zoom, descripcion)
-                VALUES ('Clase de Bienvenida', 'Sofía', NOW() + INTERVAL '1 day', 'https://zoom.us/j/pendientesofia', 'Introducción al método Tamar.');
-            `);
-        }
     } catch (tableErr) { console.error(tableErr); } 
     finally { release(); }
 });
@@ -124,7 +130,7 @@ const authenticateAdmin = async (req, res, next) => {
         if (user && (req.userId == 1 || user.email === ADMIN_EMAIL)) {
             next(); 
         } else {
-            return res.status(403).json({ error: 'Acceso denegado.' });
+            return res.status(403).json({ error: 'Acceso denegado. Solo Admins.' });
         }
     } catch (error) { return res.status(500).json({ error: 'Error auth.' }); }
 };
@@ -157,7 +163,6 @@ app.post('/api/registro', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error server.' }); }
 });
 
-// LOGIN MEJORADO CON LÓGICA VIP
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     try {
@@ -168,8 +173,7 @@ app.post('/api/login', async (req, res) => {
         
         const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
         
-        // --- LÓGICA VIP ---
-        // Si el email es admin@tamar.com O el ID es 1, es VIP y entra sin pagar
+        // LÓGICA VIP (Admin entra gratis)
         const isVIP = (user.email === 'admin@tamar.com' || user.id == 1);
         
         if (user.es_alumno_pago !== true && !isVIP) {
@@ -271,20 +275,17 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS PROTEGIDAS (CON LÓGICA VIP)
+// -- RUTAS PROTEGIDAS (Videos, Progreso)
 // -------------------------------------------------------------------
 
 app.get('/api/videos', authenticateToken, async (req, res) => {
     try {
         const userId = req.userId;
-        // Obtenemos estado de pago Y email para verificar VIP
         const userCheck = await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [userId]);
         const user = userCheck.rows[0];
         
-        // --- LÓGICA VIP ---
         const isVIP = (user.email === 'admin@tamar.com' || userId == 1);
         
-        // Si NO pagó Y NO es VIP, bloqueamos
         if (!user.es_alumno_pago && !isVIP) {
             return res.status(403).json({ error: 'Requiere pago.', requierePago: true });
         }
@@ -310,7 +311,6 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
         const userCheck = await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId]);
         const user = userCheck.rows[0];
         
-        // --- LÓGICA VIP ---
         const isVIP = (user.email === 'admin@tamar.com' || req.userId == 1);
 
         if (!user.es_alumno_pago && !isVIP) return res.status(403).json({ error: 'Pago requerido.' });
@@ -321,7 +321,7 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS ADMIN
+// -- RUTAS ADMIN (Dashboard + Gestión)
 // -------------------------------------------------------------------
 
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
@@ -338,19 +338,80 @@ app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, asy
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
+// NUEVO: Reset Password
+app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, async (req, res) => {
+    const { email, newPassword } = req.body;
+    try {
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        const result = await pool.query('UPDATE usuarios SET password_hash = $1 WHERE email = $2 RETURNING id', [hashedPassword, email]);
+        
+        if (result.rows.length > 0) {
+            res.json({ message: 'Contraseña actualizada.' });
+        } else {
+            res.status(404).json({ error: 'Usuario no encontrado.' });
+        }
+    } catch (error) { res.status(500).json({ error: 'Error interno.' }); }
+});
+
+// NUEVO: Agendar Nueva Clase
+app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
+    const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, descripcion } = req.body;
+    try {
+        const fechaHora = `${fecha}T${hora}:00`;
+        await pool.query(
+            `INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, descripcion) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [titulo, materia, profesor, fechaHora, link_zoom, link_recursos, descripcion]
+        );
+        res.json({ message: 'Clase creada.' });
+    } catch (error) { res.status(500).json({ error: 'Error al guardar clase.' }); }
+});
+
 // -------------------------------------------------------------------
-// -- RUTA MÁGICA (Dev Tool para activar cuentas manualmente)
+// -- HERRAMIENTAS DE SETUP (Actualizar DB)
 // -------------------------------------------------------------------
+app.get('/api/setup/update-clases', async (req, res) => {
+    try {
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_recursos TEXT;`);
+        res.send('✅ DB Actualizada (Columnas de Clases Agregadas)');
+    } catch (error) { res.status(500).send(error.message); }
+});
+
+// Carga de Videos (Seeder)
+app.get('/api/setup/cargar-videos', async (req, res) => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS videos (
+                id SERIAL PRIMARY KEY,
+                titulo_completo VARCHAR(255) NOT NULL,
+                titulo_corto VARCHAR(100),
+                modulo INT,
+                orden INT,
+                url_video TEXT,
+                descripcion TEXT
+            );
+        `);
+        const check = await pool.query('SELECT COUNT(*) FROM videos');
+        if (parseInt(check.rows[0].count) > 0) return res.send('⚠️ Videos ya existen.');
+        
+        // EJEMPLO - AQUÍ CAMBIAS POR LOS REALES LUEGO
+        await pool.query(`
+            INSERT INTO videos (titulo_completo, titulo_corto, modulo, orden, url_video) VALUES 
+            ('Bienvenida (Demo)', 'Intro', 1, 1, 'https://www.youtube.com/embed/tgbNymZ7vqY')
+        `);
+        res.send('✅ Videos cargados.');
+    } catch (error) { res.status(500).send(error.message); }
+});
+
+// Activar Usuario Manualmente
 app.get('/api/magic/activar/:email', async (req, res) => {
     try {
         const email = req.params.email;
-        const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id, nombre', [email]);
-        if (result.rows.length > 0) {
-            res.send(`<h1>✅ Usuario Activado</h1><p>${email} tiene acceso total.</p>`);
-        } else {
-            res.send(`<h1>❌ Error</h1><p>Usuario no encontrado.</p>`);
-        }
-    } catch (error) { res.status(500).send('Error interno'); }
+        const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id', [email]);
+        if (result.rows.length > 0) res.send(`✅ ${email} activado.`);
+        else res.send(`❌ ${email} no encontrado.`);
+    } catch (error) { res.status(500).send('Error'); }
 });
 
 app.listen(port, () => { console.log(`Servidor en puerto ${port}`); });
