@@ -23,8 +23,6 @@ const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN 
 // 2. PAYPAL (Internacional)
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
-// Cambiar a 'https://api-m.paypal.com' para PRODUCCIÓN (cuando lancen de verdad)
-// Usar 'https://api-m.sandbox.paypal.com' para PRUEBAS
 const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com'; 
 
 // CONFIGURACIÓN DE BREVO
@@ -54,6 +52,7 @@ async function syncBrevoContact(email, nombre, listId) {
 
 // Helper para obtener Token de PayPal
 async function getPayPalAccessToken() {
+    if(!PAYPAL_CLIENT_ID) return null;
     const auth = Buffer.from(PAYPAL_CLIENT_ID + ':' + PAYPAL_CLIENT_SECRET).toString('base64');
     const response = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
         method: 'POST',
@@ -89,6 +88,15 @@ pool.connect(async (err, client, release) => {
             );
         `);
         console.log('✅ DB Inicializada.');
+        
+        // Insertar datos de prueba si está vacío
+        const checkData = await client.query('SELECT COUNT(*) FROM clases_en_vivo');
+        if (parseInt(checkData.rows[0].count) === 0) {
+            await client.query(`
+                INSERT INTO clases_en_vivo (titulo, profesor, fecha_hora, link_zoom, descripcion)
+                VALUES ('Clase de Bienvenida', 'Sofía', NOW() + INTERVAL '1 day', 'https://zoom.us/j/pendientesofia', 'Introducción al método Tamar.');
+            `);
+        }
     } catch (tableErr) { console.error(tableErr); } 
     finally { release(); }
 });
@@ -120,9 +128,8 @@ const authenticateAdmin = async (req, res, next) => {
 };
 
 // -------------------------------------------------------------------
-// -- RUTAS PÚBLICAS & AUTH (Leads, Registro, Login)
+// -- RUTAS PÚBLICAS & AUTH
 // -------------------------------------------------------------------
-// (Mantengo estas rutas igual que antes, resumidas para ahorrar espacio visual)
 
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
@@ -148,23 +155,33 @@ app.post('/api/registro', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error server.' }); }
 });
 
+// LOGIN MEJORADO CON LÓGICA VIP
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     try {
-        const result = await pool.query('SELECT id, nombre, password_hash, es_alumno_pago FROM usuarios WHERE email = $1', [email]);
+        const result = await pool.query('SELECT id, nombre, password_hash, es_alumno_pago, email FROM usuarios WHERE email = $1', [email]);
         const user = result.rows[0];
+        
         if (!user || !await bcrypt.compare(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales incorrectas.' });
+        
         const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
-        if (user.es_alumno_pago !== true) return res.json({ message: 'Pago pendiente.', userId: user.id, nombre: user.nombre, token: token, requierePago: true });
+        
+        // --- LÓGICA VIP ---
+        // Si el email es admin@tamar.com O el ID es 1, es VIP y entra sin pagar
+        const isVIP = (user.email === 'admin@tamar.com' || user.id == 1);
+        
+        if (user.es_alumno_pago !== true && !isVIP) {
+             return res.json({ message: 'Pago pendiente.', userId: user.id, nombre: user.nombre, token: token, requierePago: true });
+        }
+        
         res.json({ message: 'Bienvenido.', userId: user.id, nombre: user.nombre, token: token, requierePago: false });
     } catch (error) { res.status(500).json({ error: 'Error server.' }); }
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS DE PAGOS (MERCADO PAGO Y PAYPAL)
+// -- RUTAS DE PAGOS
 // -------------------------------------------------------------------
 
-// 1. MERCADO PAGO (ARS)
 app.post('/api/crear-pago', authenticateToken, async (req, res) => {
     try {
         const userId = req.userId;
@@ -189,7 +206,6 @@ app.post('/api/crear-pago', authenticateToken, async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error MP.' }); }
 });
 
-// Webhook Mercado Pago
 app.post('/api/webhook/mercadopago', async (req, res) => {
     const topic = req.query.topic || req.query.type;
     const paymentId = req.query.id || req.query['data.id'];
@@ -203,7 +219,6 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
                     const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE id = $1 RETURNING email, nombre', [userId]);
                     if (result.rows.length > 0) {
                         await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
-                        console.log(`MP: Usuario ${userId} activado.`);
                     }
                 }
             }
@@ -212,16 +227,17 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
     } catch (error) { res.sendStatus(500); }
 });
 
-// 2. PAYPAL (USD) - NUEVO
 app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
     try {
         const accessToken = await getPayPalAccessToken();
+        if (!accessToken) return res.status(500).json({ error: 'Falta configurar PayPal.' });
+        
         const response = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
             body: JSON.stringify({
                 intent: 'CAPTURE',
-                purchase_units: [{ amount: { currency_code: 'USD', value: '50.00' } }], // PRECIO EN DÓLARES
+                purchase_units: [{ amount: { currency_code: 'USD', value: '50.00' } }],
                 application_context: {
                     return_url: `https://tamarescuela.netlify.app/videos.html?status=paypal_success`,
                     cancel_url: `https://tamarescuela.netlify.app/videos.html?status=failure`
@@ -230,13 +246,9 @@ app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
         });
         const order = await response.json();
         res.json(order);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Error creando orden PayPal' });
-    }
+    } catch (error) { res.status(500).json({ error: 'Error PayPal.' }); }
 });
 
-// Capturar el pago de PayPal (El paso final para cobrar)
 app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
     const { orderID } = req.body;
     try {
@@ -246,35 +258,37 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }
         });
         const captureData = await response.json();
-
         if (captureData.status === 'COMPLETED') {
-            // Activar usuario
             const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE id = $1 RETURNING email, nombre', [req.userId]);
             if (result.rows.length > 0) {
                 await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
-                console.log(`PayPal: Usuario ${req.userId} activado.`);
             }
             res.json({ status: 'COMPLETED' });
-        } else {
-            res.status(400).json({ error: 'El pago no se completó.' });
-        }
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Error capturando PayPal' });
-    }
+        } else { res.status(400).json({ error: 'Pago incompleto.' }); }
+    } catch (error) { res.status(500).json({ error: 'Error PayPal.' }); }
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS PROTEGIDAS (Videos, Progreso, Admin)
+// -- RUTAS PROTEGIDAS (CON LÓGICA VIP)
 // -------------------------------------------------------------------
 
 app.get('/api/videos', authenticateToken, async (req, res) => {
     try {
-        const userCheck = await pool.query('SELECT es_alumno_pago FROM usuarios WHERE id = $1', [req.userId]);
-        if (!userCheck.rows[0].es_alumno_pago) return res.status(403).json({ error: 'Requiere pago.', requierePago: true });
+        const userId = req.userId;
+        // Obtenemos estado de pago Y email para verificar VIP
+        const userCheck = await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [userId]);
+        const user = userCheck.rows[0];
+        
+        // --- LÓGICA VIP ---
+        const isVIP = (user.email === 'admin@tamar.com' || userId == 1);
+        
+        // Si NO pagó Y NO es VIP, bloqueamos
+        if (!user.es_alumno_pago && !isVIP) {
+            return res.status(403).json({ error: 'Requiere pago.', requierePago: true });
+        }
 
         const videos = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
-        const progreso = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [req.userId]);
+        const progreso = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [userId]);
         const completed = new Set(progreso.rows.map(r => r.video_id));
         const videosWithStatus = videos.rows.map(v => ({ ...v, completado: completed.has(v.id) }));
         
@@ -291,14 +305,23 @@ app.post('/api/progreso', authenticateToken, async (req, res) => {
 
 app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
     try {
-        const userCheck = await pool.query('SELECT es_alumno_pago FROM usuarios WHERE id = $1', [req.userId]);
-        if (!userCheck.rows[0].es_alumno_pago) return res.status(403).json({ error: 'Pago requerido.' });
+        const userCheck = await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId]);
+        const user = userCheck.rows[0];
+        
+        // --- LÓGICA VIP ---
+        const isVIP = (user.email === 'admin@tamar.com' || req.userId == 1);
+
+        if (!user.es_alumno_pago && !isVIP) return res.status(403).json({ error: 'Pago requerido.' });
+        
         const result = await pool.query('SELECT * FROM clases_en_vivo ORDER BY fecha_hora ASC');
         res.json({ clases: result.rows });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// ADMIN RUTAS
+// -------------------------------------------------------------------
+// -- RUTAS ADMIN
+// -------------------------------------------------------------------
+
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
     try {
         const result = await pool.query('SELECT id, nombre, email FROM usuarios WHERE es_alumno_pago = TRUE ORDER BY id DESC');
@@ -311,6 +334,21 @@ app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, asy
         const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC');
         res.json({ leads: result.rows });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+// -------------------------------------------------------------------
+// -- RUTA MÁGICA (Dev Tool para activar cuentas manualmente)
+// -------------------------------------------------------------------
+app.get('/api/magic/activar/:email', async (req, res) => {
+    try {
+        const email = req.params.email;
+        const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id, nombre', [email]);
+        if (result.rows.length > 0) {
+            res.send(`<h1>✅ Usuario Activado</h1><p>${email} tiene acceso total.</p>`);
+        } else {
+            res.send(`<h1>❌ Error</h1><p>Usuario no encontrado.</p>`);
+        }
+    } catch (error) { res.status(500).send('Error interno'); }
 });
 
 app.listen(port, () => { console.log(`Servidor en puerto ${port}`); });
