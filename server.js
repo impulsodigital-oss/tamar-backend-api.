@@ -16,7 +16,6 @@ const port = process.env.PORT || 3000;
 const jwtSecret = process.env.JWT_SECRET;
 
 // MERCADO PAGO: Configuración Cliente
-// Asegúrate de tener MP_ACCESS_TOKEN en las variables de Render
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
 // CONFIGURACIÓN DE BREVO
@@ -80,7 +79,7 @@ pool.connect(async (err, client, release) => {
         `);
         console.log('✅ Tabla "clases_en_vivo" verificada/creada exitosamente.');
         
-        // Insertar una clase de prueba si la tabla está vacía (para evitar pantallas vacías)
+        // Insertar una clase de prueba si la tabla está vacía
         const checkData = await client.query('SELECT COUNT(*) FROM clases_en_vivo');
         if (parseInt(checkData.rows[0].count) === 0) {
             await client.query(`
@@ -113,12 +112,26 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-const authenticateAdmin = (req, res, next) => {
-    // Solo permite acceso al ID 1 (Sofía)
-    if (req.userId != 1) { 
-        return res.status(403).json({ error: 'Acceso denegado. Se requiere ser administrador.' });
+// --- MODIFICACIÓN ADMIN: AHORA PERMITE EL EMAIL admin@tamar.com ---
+const authenticateAdmin = async (req, res, next) => {
+    try {
+        // Buscamos al usuario en la BD para ver su email
+        const result = await pool.query('SELECT email FROM usuarios WHERE id = $1', [req.userId]);
+        const user = result.rows[0];
+
+        // EMAIL DE ADMINISTRADOR DEFINIDO AQUÍ
+        const ADMIN_EMAIL = 'admin@tamar.com'; 
+
+        // Verificamos: ¿Es el ID 1 O es el email admin@tamar.com?
+        if (user && (req.userId == 1 || user.email === ADMIN_EMAIL)) {
+            next(); // Es admin, pase por favor
+        } else {
+            return res.status(403).json({ error: 'Acceso denegado. Se requiere ser administrador.' });
+        }
+    } catch (error) {
+        console.error('Error auth admin:', error);
+        return res.status(500).json({ error: 'Error al verificar permisos.' });
     }
-    next();
 };
 
 // -------------------------------------------------------------------
@@ -362,6 +375,7 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
 // -- RUTAS ADMIN
 // -------------------------------------------------------------------
 
+// Usamos el nuevo middleware authenticateAdmin
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
     try {
         const result = await pool.query('SELECT id, nombre, email FROM usuarios WHERE es_alumno_pago = TRUE ORDER BY id DESC');
