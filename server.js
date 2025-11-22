@@ -197,6 +197,24 @@ app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, asy
     const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC');
     res.json({ leads: result.rows });
 });
+
+// NUEVO: ELIMINAR USUARIO (Lead o Activo)
+app.delete('/api/admin/usuarios/:id', authenticateToken, authenticateAdmin, async (req, res) => {
+    const userId = req.params.id;
+    try {
+        // 1. Primero borramos el progreso del alumno (si lo tiene) para evitar errores de "Foreign Key"
+        await pool.query('DELETE FROM progreso_alumnos WHERE usuario_id = $1', [userId]);
+        
+        // 2. Luego borramos el usuario de la tabla principal
+        await pool.query('DELETE FROM usuarios WHERE id = $1', [userId]);
+        
+        res.json({ message: 'Usuario eliminado permanentemente.' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Error al eliminar usuario.' });
+    }
+});
+
 app.post('/api/admin/activar-manual', authenticateToken, authenticateAdmin, async (req, res) => {
     const { userId, plan } = req.body;
     const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [userId, plan || 'Manual']);
