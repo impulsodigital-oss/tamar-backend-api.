@@ -30,6 +30,17 @@ const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const LIST_ID_LEADS = 1;
 const LIST_ID_ALUMNOS = 2;
 
+// --- DICCIONARIO DE PLANES (Precios) ---
+// Ajustar valores en pesos según la cotización del momento
+const PLANES = {
+    'basico': { titulo: 'Plan Básico (Mensual)', precio_usd: 39.00, precio_ars: 46800 },
+    'core': { titulo: 'Plan Core (3 Clases/mes)', precio_usd: 59.00, precio_ars: 70800 },
+    'plus': { titulo: 'Plan Plus (10 Clases/mes)', precio_usd: 129.00, precio_ars: 154800 },
+    'selecto': { titulo: 'Plan Selecto (4 Clases/sem)', precio_usd: 109.00, precio_ars: 130800 },
+    'completo': { titulo: 'Plan Completo (Full)', precio_usd: 229.00, precio_ars: 274800 },
+    'certificacion': { titulo: 'Matrícula Anual Certificación', precio_usd: 200.00, precio_ars: 240000 }
+};
+
 // -------------------------------------------------------------------
 // -- FUNCIONES AUXILIARES
 // -------------------------------------------------------------------
@@ -50,7 +61,6 @@ async function syncBrevoContact(email, nombre, listId) {
     } catch (error) { console.error('Error Brevo:', error); }
 }
 
-// Helper para obtener Token de PayPal
 async function getPayPalAccessToken() {
     if(!PAYPAL_CLIENT_ID) return null;
     const auth = Buffer.from(PAYPAL_CLIENT_ID + ':' + PAYPAL_CLIENT_SECRET).toString('base64');
@@ -90,7 +100,7 @@ pool.connect(async (err, client, release) => {
             );
         `);
 
-        // Tabla de Clases en Vivo (Con Materia y Recursos)
+        // Tabla de Clases en Vivo
         await client.query(`
             CREATE TABLE IF NOT EXISTS clases_en_vivo (
                 id SERIAL PRIMARY KEY,
@@ -173,7 +183,6 @@ app.post('/api/login', async (req, res) => {
         
         const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
         
-        // LÓGICA VIP (Admin entra gratis)
         const isVIP = (user.email === 'admin@tamar.com' || user.id == 1);
         
         if (user.es_alumno_pago !== true && !isVIP) {
@@ -185,18 +194,28 @@ app.post('/api/login', async (req, res) => {
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS DE PAGOS
+// -- RUTAS DE PAGOS (MULTI-PLAN)
 // -------------------------------------------------------------------
 
 app.post('/api/crear-pago', authenticateToken, async (req, res) => {
+    const { planId } = req.body; // Default si no envían nada: 'basico'
+    const plan = PLANES[planId] || PLANES['basico'];
+
     try {
         const userId = req.userId;
         const userResult = await pool.query('SELECT email, nombre FROM usuarios WHERE id = $1', [userId]);
         const user = userResult.rows[0];
+        
         const preference = new Preference(client);
         const result = await preference.create({
             body: {
-                items: [{ id: 'curso-tamar-completo', title: 'Escuela Tamar (Acceso Total)', quantity: 1, unit_price: 50000, currency_id: 'ARS' }],
+                items: [{
+                    id: planId || 'basico',
+                    title: `Tamar - ${plan.titulo}`,
+                    quantity: 1,
+                    unit_price: plan.precio_ars,
+                    currency_id: 'ARS'
+                }],
                 payer: { email: user.email, name: user.nombre },
                 back_urls: {
                     success: 'https://tamarescuela.netlify.app/videos.html?status=success',
@@ -205,11 +224,11 @@ app.post('/api/crear-pago', authenticateToken, async (req, res) => {
                 },
                 auto_return: 'approved',
                 notification_url: 'https://tamar-backend-api-gqy9.onrender.com/api/webhook/mercadopago',
-                metadata: { user_id: userId }
+                metadata: { user_id: userId, plan_id: planId }
             }
         });
         res.json({ id: result.id, init_point: result.init_point });
-    } catch (error) { res.status(500).json({ error: 'Error MP.' }); }
+    } catch (error) { res.status(500).json({ error: 'Error MP' }); }
 });
 
 app.post('/api/webhook/mercadopago', async (req, res) => {
@@ -234,6 +253,9 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
 });
 
 app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
+    const { planId } = req.body;
+    const plan = PLANES[planId] || PLANES['basico'];
+
     try {
         const accessToken = await getPayPalAccessToken();
         if (!accessToken) return res.status(500).json({ error: 'Falta configurar PayPal.' });
@@ -243,7 +265,10 @@ app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
             body: JSON.stringify({
                 intent: 'CAPTURE',
-                purchase_units: [{ amount: { currency_code: 'USD', value: '50.00' } }],
+                purchase_units: [{ 
+                    amount: { currency_code: 'USD', value: plan.precio_usd.toString() },
+                    description: plan.titulo 
+                }],
                 application_context: {
                     return_url: `https://tamarescuela.netlify.app/videos.html?status=paypal_success`,
                     cancel_url: `https://tamarescuela.netlify.app/videos.html?status=failure`
@@ -275,7 +300,7 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS PROTEGIDAS (Videos, Progreso)
+// -- RUTAS PROTEGIDAS
 // -------------------------------------------------------------------
 
 app.get('/api/videos', authenticateToken, async (req, res) => {
@@ -321,7 +346,7 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
 });
 
 // -------------------------------------------------------------------
-// -- RUTAS ADMIN (Dashboard + Gestión)
+// -- RUTAS ADMIN (Gestión)
 // -------------------------------------------------------------------
 
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
@@ -338,7 +363,7 @@ app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, asy
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// NUEVO: Reset Password
+// RESET PASSWORD
 app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, async (req, res) => {
     const { email, newPassword } = req.body;
     try {
@@ -353,7 +378,7 @@ app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, asyn
     } catch (error) { res.status(500).json({ error: 'Error interno.' }); }
 });
 
-// NUEVO: Agendar Nueva Clase
+// AGENDAR CLASE
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, descripcion } = req.body;
     try {
@@ -368,43 +393,26 @@ app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (
 });
 
 // -------------------------------------------------------------------
-// -- HERRAMIENTAS DE SETUP (Actualizar DB)
+// -- HERRAMIENTAS DE SETUP
 // -------------------------------------------------------------------
 app.get('/api/setup/update-clases', async (req, res) => {
     try {
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_recursos TEXT;`);
-        res.send('✅ DB Actualizada (Columnas de Clases Agregadas)');
+        res.send('✅ DB Actualizada');
     } catch (error) { res.status(500).send(error.message); }
 });
 
-// Carga de Videos (Seeder)
 app.get('/api/setup/cargar-videos', async (req, res) => {
     try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS videos (
-                id SERIAL PRIMARY KEY,
-                titulo_completo VARCHAR(255) NOT NULL,
-                titulo_corto VARCHAR(100),
-                modulo INT,
-                orden INT,
-                url_video TEXT,
-                descripcion TEXT
-            );
-        `);
+        await pool.query(`CREATE TABLE IF NOT EXISTS videos (id SERIAL PRIMARY KEY, titulo_completo VARCHAR(255) NOT NULL, titulo_corto VARCHAR(100), modulo INT, orden INT, url_video TEXT, descripcion TEXT);`);
         const check = await pool.query('SELECT COUNT(*) FROM videos');
         if (parseInt(check.rows[0].count) > 0) return res.send('⚠️ Videos ya existen.');
-        
-        // EJEMPLO - AQUÍ CAMBIAS POR LOS REALES LUEGO
-        await pool.query(`
-            INSERT INTO videos (titulo_completo, titulo_corto, modulo, orden, url_video) VALUES 
-            ('Bienvenida (Demo)', 'Intro', 1, 1, 'https://www.youtube.com/embed/tgbNymZ7vqY')
-        `);
+        await pool.query(`INSERT INTO videos (titulo_completo, titulo_corto, modulo, orden, url_video) VALUES ('Bienvenida (Demo)', 'Intro', 1, 1, 'https://www.youtube.com/embed/tgbNymZ7vqY')`);
         res.send('✅ Videos cargados.');
     } catch (error) { res.status(500).send(error.message); }
 });
 
-// Activar Usuario Manualmente
 app.get('/api/magic/activar/:email', async (req, res) => {
     try {
         const email = req.params.email;
