@@ -1,4 +1,3 @@
-// ... (Mismo inicio de siempre: imports, configs, etc.) ...
 // Cargar variables de entorno
 require('dotenv').config();
 
@@ -199,6 +198,25 @@ app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, asy
     // AHORA DEVOLVEMOS EL PLAN TAMBIÉN
     const result = await pool.query('SELECT id, nombre, email, plan_adquirido FROM usuarios WHERE es_alumno_pago = TRUE ORDER BY id DESC');
     res.json({ alumnos: result.rows });
+});
+
+// NUEVO: Activar Usuario Manualmente (Desde el Panel)
+app.post('/api/admin/activar-manual', authenticateToken, authenticateAdmin, async (req, res) => {
+    const { userId, plan } = req.body;
+    try {
+        const result = await pool.query(
+            'UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre',
+            [userId, plan || 'Manual/Efectivo']
+        );
+        
+        if (result.rows.length > 0) {
+            // Mover a lista de alumnos en Brevo
+            await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
+            res.json({ message: 'Usuario activado correctamente.' });
+        } else {
+            res.status(404).json({ error: 'Usuario no encontrado.' });
+        }
+    } catch (error) { res.status(500).json({ error: 'Error al activar.' }); }
 });
 
 // ... (Resto de rutas: leads-pendientes, reset-password, nueva-clase, videos, progreso... MANTENER IGUAL) ...
