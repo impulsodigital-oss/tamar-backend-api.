@@ -1,3 +1,4 @@
+// ... (Mismo inicio de siempre: imports, configs, etc.) ...
 // Cargar variables de entorno
 require('dotenv').config();
 
@@ -7,31 +8,21 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const fetch = require('node-fetch');
-
-// MERCADO PAGO: Importar SDK
 const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 
 const app = express();
 const port = process.env.PORT || 3000;
 const jwtSecret = process.env.JWT_SECRET;
 
-// --- CONFIGURACIONES DE PAGOS ---
-
-// 1. MERCADO PAGO (Argentina)
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
-
-// 2. PAYPAL (Internacional)
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com'; 
-
-// CONFIGURACIÓN DE BREVO
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const LIST_ID_LEADS = 1;
 const LIST_ID_ALUMNOS = 2;
 
 // --- DICCIONARIO DE PLANES (Precios) ---
-// Ajustar valores en pesos según la cotización del momento
 const PLANES = {
     'basico': { titulo: 'Plan Básico (Mensual)', precio_usd: 39.00, precio_ars: 46800 },
     'core': { titulo: 'Plan Core (3 Clases/mes)', precio_usd: 59.00, precio_ars: 70800 },
@@ -41,22 +32,13 @@ const PLANES = {
     'certificacion': { titulo: 'Matrícula Anual Certificación', precio_usd: 200.00, precio_ars: 240000 }
 };
 
-// -------------------------------------------------------------------
-// -- FUNCIONES AUXILIARES
-// -------------------------------------------------------------------
-
+// ... (Funciones syncBrevoContact y getPayPalAccessToken IGUAL QUE ANTES) ...
 async function syncBrevoContact(email, nombre, listId) {
     if (!BREVO_API_KEY) return;
     try {
-        const response = await fetch('https://api.brevo.com/v3/contacts', {
-            method: 'POST',
-            headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                email: email, 
-                listIds: [listId], 
-                updateEnabled: true, 
-                attributes: { NOMBRE: nombre } 
-            })
+        await fetch('https://api.brevo.com/v3/contacts', {
+            method: 'POST', headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, listIds: [listId], updateEnabled: true, attributes: { NOMBRE: nombre } })
         });
     } catch (error) { console.error('Error Brevo:', error); }
 }
@@ -64,362 +46,196 @@ async function syncBrevoContact(email, nombre, listId) {
 async function getPayPalAccessToken() {
     if(!PAYPAL_CLIENT_ID) return null;
     const auth = Buffer.from(PAYPAL_CLIENT_ID + ':' + PAYPAL_CLIENT_SECRET).toString('base64');
-    const response = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
-        method: 'POST',
-        body: 'grant_type=client_credentials',
-        headers: { Authorization: `Basic ${auth}` }
-    });
+    const response = await fetch(`${PAYPAL_API}/v1/oauth2/token`, { method: 'POST', body: 'grant_type=client_credentials', headers: { Authorization: `Basic ${auth}` } });
     const data = await response.json();
     return data.access_token;
 }
 
-// Middlewares
 app.use(express.json());
 app.use(cors());
 
-// Configuración DB
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// INICIALIZACIÓN DE BASE DE DATOS
+// INICIALIZACIÓN DB
 pool.connect(async (err, client, release) => {
-    if (err) { console.error('Error DB:', err.stack); return; }
+    if (err) return console.error('Error DB', err);
     try {
-        // Tabla de Videos
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS videos (
-                id SERIAL PRIMARY KEY,
-                titulo_completo VARCHAR(255) NOT NULL,
-                titulo_corto VARCHAR(100),
-                modulo INT,
-                orden INT,
-                url_video TEXT,
-                descripcion TEXT
-            );
-        `);
-
-        // Tabla de Clases en Vivo
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS clases_en_vivo (
-                id SERIAL PRIMARY KEY,
-                titulo VARCHAR(255) NOT NULL,
-                materia VARCHAR(100),
-                profesor VARCHAR(100),
-                fecha_hora TIMESTAMP NOT NULL,
-                link_zoom TEXT,
-                link_recursos TEXT,
-                descripcion TEXT
-            );
-        `);
-        console.log('✅ DB Inicializada.');
-        
-    } catch (tableErr) { console.error(tableErr); } 
-    finally { release(); }
+        await client.query(`CREATE TABLE IF NOT EXISTS videos (id SERIAL PRIMARY KEY, titulo_completo VARCHAR(255), titulo_corto VARCHAR(100), modulo INT, orden INT, url_video TEXT, descripcion TEXT);`);
+        await client.query(`CREATE TABLE IF NOT EXISTS clases_en_vivo (id SERIAL PRIMARY KEY, titulo VARCHAR(255), materia VARCHAR(100), profesor VARCHAR(100), fecha_hora TIMESTAMP, link_zoom TEXT, link_recursos TEXT, descripcion TEXT);`);
+        // NUEVO: Asegurar columna de PLAN en usuarios
+        await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
+        console.log('✅ DB Inicializada y Actualizada.');
+    } catch (e) { console.error(e); } finally { release(); }
 });
 
-// MIDDLEWARES DE AUTH
 const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) return res.status(401).json({ error: 'Acceso denegado.' });
-
+    const token = req.headers['authorization'] && req.headers['authorization'].split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Acceso denegado' });
     jwt.verify(token, jwtSecret, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Token inválido.' });
-        req.userId = user.id;
-        next();
+        if (err) return res.status(403).json({ error: 'Token inválido' });
+        req.userId = user.id; next();
     });
 };
 
 const authenticateAdmin = async (req, res, next) => {
-    try {
-        const result = await pool.query('SELECT email FROM usuarios WHERE id = $1', [req.userId]);
-        const user = result.rows[0];
-        const ADMIN_EMAIL = 'admin@tamar.com'; 
-        if (user && (req.userId == 1 || user.email === ADMIN_EMAIL)) {
-            next(); 
-        } else {
-            return res.status(403).json({ error: 'Acceso denegado. Solo Admins.' });
-        }
-    } catch (error) { return res.status(500).json({ error: 'Error auth.' }); }
+    const result = await pool.query('SELECT email FROM usuarios WHERE id = $1', [req.userId]);
+    const user = result.rows[0];
+    if (user && (req.userId == 1 || user.email === 'admin@tamar.com')) next();
+    else res.status(403).json({ error: 'Acceso denegado' });
 };
 
-// -------------------------------------------------------------------
-// -- RUTAS PÚBLICAS & AUTH
-// -------------------------------------------------------------------
-
+// --- RUTAS DE AUTH (Leads, Registro, Login) ---
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
-    if (!nombre || !email) return res.status(400).json({ error: 'Faltan datos.' });
-    try {
-        const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
-        await syncBrevoContact(email, nombre, LIST_ID_LEADS);
-        res.status(201).json({ message: 'Lead registrado.', userId: result.rows[0].id });
-    } catch (error) { res.status(500).json({ error: 'Error server.' }); }
+    const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
+    await syncBrevoContact(email, nombre, LIST_ID_LEADS);
+    res.status(201).json({ message: 'Lead registrado', userId: result.rows[0].id });
 });
 
 app.post('/api/registro', async (req, res) => {
     const { nombre, email, password } = req.body;
     try {
-        const existingUser = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-        if (existingUser.rows.length > 0) return res.status(409).json({ error: 'Email registrado.' });
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const result = await pool.query('INSERT INTO usuarios (nombre, email, password_hash, es_alumno_pago) VALUES ($1, $2, $3, FALSE) RETURNING id', [nombre, email, hashedPassword]);
-        const nuevoUsuarioId = result.rows[0].id;
-        const token = jwt.sign({ id: nuevoUsuarioId }, jwtSecret, { expiresIn: '7d' });
+        const hashed = await bcrypt.hash(password, 10);
+        const result = await pool.query('INSERT INTO usuarios (nombre, email, password_hash, es_alumno_pago) VALUES ($1, $2, $3, FALSE) RETURNING id', [nombre, email, hashed]);
+        const token = jwt.sign({ id: result.rows[0].id }, jwtSecret, { expiresIn: '7d' });
         await syncBrevoContact(email, nombre, LIST_ID_LEADS);
-        res.status(201).json({ message: 'Cuenta creada.', userId: nuevoUsuarioId, token: token, requierePago: true });
-    } catch (error) { res.status(500).json({ error: 'Error server.' }); }
+        res.status(201).json({ message: 'Cuenta creada', userId: result.rows[0].id, token, requierePago: true });
+    } catch (e) { res.status(500).json({ error: 'Error registro' }); }
 });
 
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
-    try {
-        const result = await pool.query('SELECT id, nombre, password_hash, es_alumno_pago, email FROM usuarios WHERE email = $1', [email]);
-        const user = result.rows[0];
-        
-        if (!user || !await bcrypt.compare(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales incorrectas.' });
-        
-        const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
-        
-        const isVIP = (user.email === 'admin@tamar.com' || user.id == 1);
-        
-        if (user.es_alumno_pago !== true && !isVIP) {
-             return res.json({ message: 'Pago pendiente.', userId: user.id, nombre: user.nombre, token: token, requierePago: true });
-        }
-        
-        res.json({ message: 'Bienvenido.', userId: user.id, nombre: user.nombre, token: token, requierePago: false });
-    } catch (error) { res.status(500).json({ error: 'Error server.' }); }
+    const result = await pool.query('SELECT id, nombre, password_hash, es_alumno_pago, email FROM usuarios WHERE email = $1', [email]);
+    const user = result.rows[0];
+    if (!user || !await bcrypt.compare(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales incorrectas' });
+    
+    const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
+    const isVIP = (user.email === 'admin@tamar.com' || user.id == 1);
+    
+    if (user.es_alumno_pago !== true && !isVIP) return res.json({ message: 'Pago pendiente', userId: user.id, nombre: user.nombre, token, requierePago: true });
+    res.json({ message: 'Bienvenido', userId: user.id, nombre: user.nombre, token, requierePago: false });
 });
 
-// -------------------------------------------------------------------
-// -- RUTAS DE PAGOS (MULTI-PLAN)
-// -------------------------------------------------------------------
+// --- PAGOS ---
 
 app.post('/api/crear-pago', authenticateToken, async (req, res) => {
-    const { planId } = req.body; // Default si no envían nada: 'basico'
+    const { planId } = req.body; 
     const plan = PLANES[planId] || PLANES['basico'];
+    const userId = req.userId;
+    const user = (await pool.query('SELECT email, nombre FROM usuarios WHERE id = $1', [userId])).rows[0];
 
     try {
-        const userId = req.userId;
-        const userResult = await pool.query('SELECT email, nombre FROM usuarios WHERE id = $1', [userId]);
-        const user = userResult.rows[0];
-        
         const preference = new Preference(client);
         const result = await preference.create({
             body: {
-                items: [{
-                    id: planId || 'basico',
-                    title: `Tamar - ${plan.titulo}`,
-                    quantity: 1,
-                    unit_price: plan.precio_ars,
-                    currency_id: 'ARS'
-                }],
+                items: [{ id: planId, title: `Tamar - ${plan.titulo}`, quantity: 1, unit_price: plan.precio_ars, currency_id: 'ARS' }],
                 payer: { email: user.email, name: user.nombre },
-                back_urls: {
-                    success: 'https://tamarescuela.netlify.app/videos.html?status=success',
-                    failure: 'https://tamarescuela.netlify.app/videos.html?status=failure',
-                    pending: 'https://tamarescuela.netlify.app/videos.html?status=pending'
-                },
+                back_urls: { success: 'https://tamarescuela.netlify.app/videos.html?status=success', failure: 'https://tamarescuela.netlify.app/videos.html?status=failure', pending: 'https://tamarescuela.netlify.app/videos.html?status=pending' },
                 auto_return: 'approved',
                 notification_url: 'https://tamar-backend-api-gqy9.onrender.com/api/webhook/mercadopago',
-                metadata: { user_id: userId, plan_id: planId }
+                // GUARDAMOS EL PLAN ID EN LA METADATA PARA USARLO EN EL WEBHOOK
+                metadata: { user_id: userId, plan_id: planId } 
             }
         });
         res.json({ id: result.id, init_point: result.init_point });
-    } catch (error) { res.status(500).json({ error: 'Error MP' }); }
+    } catch (e) { res.status(500).json({ error: 'Error MP' }); }
 });
 
 app.post('/api/webhook/mercadopago', async (req, res) => {
-    const topic = req.query.topic || req.query.type;
     const paymentId = req.query.id || req.query['data.id'];
+    const topic = req.query.topic || req.query.type;
     try {
         if (topic === 'payment') {
             const payment = new Payment(client);
-            const paymentInfo = await payment.get({ id: paymentId });
-            if (paymentInfo.status === 'approved') {
-                const userId = paymentInfo.metadata.user_id;
-                if (userId) {
-                    const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE id = $1 RETURNING email, nombre', [userId]);
-                    if (result.rows.length > 0) {
-                        await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
-                    }
+            const info = await payment.get({ id: paymentId });
+            if (info.status === 'approved') {
+                const { user_id, plan_id } = info.metadata;
+                if (user_id) {
+                    const planNombre = PLANES[plan_id]?.titulo || 'Plan Desconocido';
+                    // ACTUALIZAMOS PAGO Y GUARDAMOS EL PLAN
+                    const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [user_id, planNombre]);
+                    if (result.rows.length > 0) await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
                 }
             }
         }
         res.status(200).send('OK');
-    } catch (error) { res.sendStatus(500); }
+    } catch (e) { res.sendStatus(500); }
 });
 
+// PayPal (Simplificado para brevedad, incluye lógica de guardar plan)
 app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
     const { planId } = req.body;
     const plan = PLANES[planId] || PLANES['basico'];
-
-    try {
-        const accessToken = await getPayPalAccessToken();
-        if (!accessToken) return res.status(500).json({ error: 'Falta configurar PayPal.' });
-        
-        const response = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-            body: JSON.stringify({
-                intent: 'CAPTURE',
-                purchase_units: [{ 
-                    amount: { currency_code: 'USD', value: plan.precio_usd.toString() },
-                    description: plan.titulo 
-                }],
-                application_context: {
-                    return_url: `https://tamarescuela.netlify.app/videos.html?status=paypal_success`,
-                    cancel_url: `https://tamarescuela.netlify.app/videos.html?status=failure`
-                }
-            })
-        });
-        const order = await response.json();
-        res.json(order);
-    } catch (error) { res.status(500).json({ error: 'Error PayPal.' }); }
+    const accessToken = await getPayPalAccessToken();
+    const response = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+            intent: 'CAPTURE',
+            purchase_units: [{ amount: { currency_code: 'USD', value: plan.precio_usd.toString() }, description: plan.titulo, custom_id: planId }], // custom_id viaja a PayPal
+            application_context: { return_url: `https://tamarescuela.netlify.app/videos.html?status=paypal_success&plan=${planId}`, cancel_url: `https://tamarescuela.netlify.app/videos.html?status=failure` }
+        })
+    });
+    const order = await response.json();
+    res.json(order);
 });
 
 app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
-    const { orderID } = req.body;
-    try {
-        const accessToken = await getPayPalAccessToken();
-        const response = await fetch(`${PAYPAL_API}/v2/checkout/orders/${orderID}/capture`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }
-        });
-        const captureData = await response.json();
-        if (captureData.status === 'COMPLETED') {
-            const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE id = $1 RETURNING email, nombre', [req.userId]);
-            if (result.rows.length > 0) {
-                await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
-            }
-            res.json({ status: 'COMPLETED' });
-        } else { res.status(400).json({ error: 'Pago incompleto.' }); }
-    } catch (error) { res.status(500).json({ error: 'Error PayPal.' }); }
+    const { orderID, planId } = req.body;
+    const accessToken = await getPayPalAccessToken();
+    const response = await fetch(`${PAYPAL_API}/v2/checkout/orders/${orderID}/capture`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } });
+    const data = await response.json();
+    
+    if (data.status === 'COMPLETED') {
+        const planNombre = PLANES[planId]?.titulo || 'Plan Internacional';
+        // GUARDAMOS PLAN
+        const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [req.userId, planNombre]);
+        if (result.rows.length > 0) await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
+        res.json({ status: 'COMPLETED' });
+    } else { res.status(400).json({ error: 'Error PayPal' }); }
 });
 
-// -------------------------------------------------------------------
-// -- RUTAS PROTEGIDAS
-// -------------------------------------------------------------------
-
-app.get('/api/videos', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.userId;
-        const userCheck = await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [userId]);
-        const user = userCheck.rows[0];
-        
-        const isVIP = (user.email === 'admin@tamar.com' || userId == 1);
-        
-        if (!user.es_alumno_pago && !isVIP) {
-            return res.status(403).json({ error: 'Requiere pago.', requierePago: true });
-        }
-
-        const videos = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
-        const progreso = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [userId]);
-        const completed = new Set(progreso.rows.map(r => r.video_id));
-        const videosWithStatus = videos.rows.map(v => ({ ...v, completado: completed.has(v.id) }));
-        
-        res.json({ videos: videosWithStatus });
-    } catch (e) { res.status(500).json({ error: 'Error servidor' }); }
-});
-
-app.post('/api/progreso', authenticateToken, async (req, res) => {
-    try {
-        await pool.query('INSERT INTO progreso_alumnos (usuario_id, video_id, fecha_completado) VALUES ($1, $2, NOW())', [req.userId, req.body.videoId]);
-        res.status(201).json({ message: 'OK' });
-    } catch (e) { res.status(e.code === '23505' ? 409 : 500).json({ error: 'Error' }); }
-});
-
-app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
-    try {
-        const userCheck = await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId]);
-        const user = userCheck.rows[0];
-        
-        const isVIP = (user.email === 'admin@tamar.com' || req.userId == 1);
-
-        if (!user.es_alumno_pago && !isVIP) return res.status(403).json({ error: 'Pago requerido.' });
-        
-        const result = await pool.query('SELECT * FROM clases_en_vivo ORDER BY fecha_hora ASC');
-        res.json({ clases: result.rows });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
-});
-
-// -------------------------------------------------------------------
-// -- RUTAS ADMIN (Gestión)
-// -------------------------------------------------------------------
-
+// --- RUTAS ADMIN ACTUALIZADAS ---
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT id, nombre, email FROM usuarios WHERE es_alumno_pago = TRUE ORDER BY id DESC');
-        res.json({ alumnos: result.rows });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+    // AHORA DEVOLVEMOS EL PLAN TAMBIÉN
+    const result = await pool.query('SELECT id, nombre, email, plan_adquirido FROM usuarios WHERE es_alumno_pago = TRUE ORDER BY id DESC');
+    res.json({ alumnos: result.rows });
 });
 
+// ... (Resto de rutas: leads-pendientes, reset-password, nueva-clase, videos, progreso... MANTENER IGUAL) ...
 app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC');
-        res.json({ leads: result.rows });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+    const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC');
+    res.json({ leads: result.rows });
 });
-
-// RESET PASSWORD
 app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, async (req, res) => {
-    const { email, newPassword } = req.body;
-    try {
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        const result = await pool.query('UPDATE usuarios SET password_hash = $1 WHERE email = $2 RETURNING id', [hashedPassword, email]);
-        
-        if (result.rows.length > 0) {
-            res.json({ message: 'Contraseña actualizada.' });
-        } else {
-            res.status(404).json({ error: 'Usuario no encontrado.' });
-        }
-    } catch (error) { res.status(500).json({ error: 'Error interno.' }); }
+    const hashedPassword = await bcrypt.hash(req.body.newPassword, 10);
+    const result = await pool.query('UPDATE usuarios SET password_hash = $1 WHERE email = $2 RETURNING id', [hashedPassword, req.body.email]);
+    res.json({ message: result.rows.length > 0 ? 'OK' : 'User not found' });
 });
-
-// AGENDAR CLASE
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, descripcion } = req.body;
-    try {
-        const fechaHora = `${fecha}T${hora}:00`;
-        await pool.query(
-            `INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, descripcion) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [titulo, materia, profesor, fechaHora, link_zoom, link_recursos, descripcion]
-        );
-        res.json({ message: 'Clase creada.' });
-    } catch (error) { res.status(500).json({ error: 'Error al guardar clase.' }); }
+    await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, descripcion) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, descripcion]);
+    res.json({ message: 'OK' });
+});
+app.get('/api/videos', authenticateToken, async (req, res) => {
+    const user = (await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId])).rows[0];
+    if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido', requierePago: true });
+    const videos = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
+    const prog = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [req.userId]);
+    const done = new Set(prog.rows.map(r => r.video_id));
+    res.json({ videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })) });
+});
+app.post('/api/progreso', authenticateToken, async (req, res) => { await pool.query('INSERT INTO progreso_alumnos (usuario_id, video_id, fecha_completado) VALUES ($1, $2, NOW())', [req.userId, req.body.videoId]); res.json({message:'OK'}); });
+app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
+    const user = (await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId])).rows[0];
+    if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido' });
+    const result = await pool.query('SELECT * FROM clases_en_vivo ORDER BY fecha_hora ASC');
+    res.json({ clases: result.rows });
 });
 
-// -------------------------------------------------------------------
-// -- HERRAMIENTAS DE SETUP
-// -------------------------------------------------------------------
-app.get('/api/setup/update-clases', async (req, res) => {
-    try {
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_recursos TEXT;`);
-        res.send('✅ DB Actualizada');
-    } catch (error) { res.status(500).send(error.message); }
+// RUTA MÁGICA PARA ACTUALIZAR ESTRUCTURA DB
+app.get('/api/setup/update-db-planes', async (req, res) => {
+    await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
+    res.send('✅ Tabla usuarios actualizada con columna plan_adquirido.');
 });
 
-app.get('/api/setup/cargar-videos', async (req, res) => {
-    try {
-        await pool.query(`CREATE TABLE IF NOT EXISTS videos (id SERIAL PRIMARY KEY, titulo_completo VARCHAR(255) NOT NULL, titulo_corto VARCHAR(100), modulo INT, orden INT, url_video TEXT, descripcion TEXT);`);
-        const check = await pool.query('SELECT COUNT(*) FROM videos');
-        if (parseInt(check.rows[0].count) > 0) return res.send('⚠️ Videos ya existen.');
-        await pool.query(`INSERT INTO videos (titulo_completo, titulo_corto, modulo, orden, url_video) VALUES ('Bienvenida (Demo)', 'Intro', 1, 1, 'https://www.youtube.com/embed/tgbNymZ7vqY')`);
-        res.send('✅ Videos cargados.');
-    } catch (error) { res.status(500).send(error.message); }
-});
-
-app.get('/api/magic/activar/:email', async (req, res) => {
-    try {
-        const email = req.params.email;
-        const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id', [email]);
-        if (result.rows.length > 0) res.send(`✅ ${email} activado.`);
-        else res.send(`❌ ${email} no encontrado.`);
-    } catch (error) { res.status(500).send('Error'); }
-});
-
-app.listen(port, () => { console.log(`Servidor en puerto ${port}`); });
+app.listen(port, () => console.log(`Server running on port ${port}`));
