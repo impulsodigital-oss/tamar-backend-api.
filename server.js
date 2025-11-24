@@ -64,6 +64,19 @@ pool.connect(async (err, client, release) => {
         await client.query(`CREATE TABLE IF NOT EXISTS videos (id SERIAL PRIMARY KEY, titulo_completo VARCHAR(255), titulo_corto VARCHAR(100), modulo INT, orden INT, url_video TEXT, descripcion TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS clases_en_vivo (id SERIAL PRIMARY KEY, titulo VARCHAR(255), materia VARCHAR(100), profesor VARCHAR(100), fecha_hora TIMESTAMP, link_zoom TEXT, link_recursos TEXT, descripcion TEXT);`);
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
+        
+        // --- CAMBIO 1: Creación de tabla progreso para evitar errores ---
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS progreso_alumnos (
+                id SERIAL PRIMARY KEY, 
+                usuario_id INT, 
+                video_id INT, 
+                fecha_completado TIMESTAMP DEFAULT NOW(),
+                UNIQUE(usuario_id, video_id)
+            );
+        `);
+        // ---------------------------------------------------------------
+
         console.log('✅ DB Inicializada.');
     } catch (e) { console.error(e); } finally { release(); }
 });
@@ -256,7 +269,23 @@ app.get('/api/videos', authenticateToken, async (req, res) => {
     const done = new Set(prog.rows.map(r => r.video_id));
     res.json({ videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })) });
 });
-app.post('/api/progreso', authenticateToken, async (req, res) => { await pool.query('INSERT INTO progreso_alumnos (usuario_id, video_id, fecha_completado) VALUES ($1, $2, NOW())', [req.userId, req.body.videoId]); res.json({message:'OK'}); });
+
+// --- CAMBIO 2: Evitar error si ya existe el registro de progreso ---
+app.post('/api/progreso', authenticateToken, async (req, res) => {
+    try {
+        await pool.query(`
+            INSERT INTO progreso_alumnos (usuario_id, video_id, fecha_completado) 
+            VALUES ($1, $2, NOW()) 
+            ON CONFLICT (usuario_id, video_id) DO NOTHING
+        `, [req.userId, req.body.videoId]);
+        res.json({ message: 'OK' });
+    } catch (e) {
+        console.error("Error guardando progreso:", e);
+        res.status(500).json({ error: 'Error al guardar' });
+    }
+});
+// ------------------------------------------------------------------
+
 app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
     const user = (await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId])).rows[0];
     if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido' });
