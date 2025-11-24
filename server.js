@@ -14,13 +14,13 @@ const port = process.env.PORT || 3000;
 const jwtSecret = process.env.JWT_SECRET;
 
 // --- CONFIGURACIONES ---
+// En Render, asegúrate de agregar las variables: MP_ACCESS_TOKEN, PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET
+// Y la NUEVA variable: MAKE_WEBHOOK_URL (Te explicaré cómo obtenerla abajo)
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com'; 
-const BREVO_API_KEY = process.env.BREVO_API_KEY;
-const LIST_ID_LEADS = 1;
-const LIST_ID_ALUMNOS = 2;
+const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL; // <--- NUEVA CONEXIÓN CON MAKE
 
 // --- DICCIONARIO DE PLANES ---
 const PLANES = {
@@ -32,15 +32,17 @@ const PLANES = {
     'certificacion': { titulo: 'Matrícula Anual Certificación', precio_usd: 200.00, precio_ars: 240000 }
 };
 
-// --- HELPERS ---
-async function syncBrevoContact(email, nombre, listId) {
-    if (!BREVO_API_KEY) return;
+// --- HELPER: NOTIFICAR A MAKE (Automatización) ---
+async function notifyMake(data) {
+    if (!MAKE_WEBHOOK_URL) return; // Si no configuraste Make, no hace nada (no rompe)
     try {
-        await fetch('https://api.brevo.com/v3/contacts', {
-            method: 'POST', headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, listIds: [listId], updateEnabled: true, attributes: { NOMBRE: nombre } })
+        console.log('Enviando datos a Make:', data.event);
+        await fetch(MAKE_WEBHOOK_URL, {
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
         });
-    } catch (error) { console.error('Error Brevo:', error); }
+    } catch (error) { console.error('Error enviando a Make:', error); }
 }
 
 async function getPayPalAccessToken() {
@@ -65,7 +67,7 @@ pool.connect(async (err, client, release) => {
         await client.query(`CREATE TABLE IF NOT EXISTS clases_en_vivo (id SERIAL PRIMARY KEY, titulo VARCHAR(255), materia VARCHAR(100), profesor VARCHAR(100), fecha_hora TIMESTAMP, link_zoom TEXT, link_recursos TEXT, descripcion TEXT);`);
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
         
-        // --- CAMBIO 1: Creación de tabla progreso para evitar errores ---
+        // Tabla de Progreso (IMPORTANTE: Mantener esto que ya arreglamos)
         await client.query(`
             CREATE TABLE IF NOT EXISTS progreso_alumnos (
                 id SERIAL PRIMARY KEY, 
@@ -75,7 +77,6 @@ pool.connect(async (err, client, release) => {
                 UNIQUE(usuario_id, video_id)
             );
         `);
-        // ---------------------------------------------------------------
 
         console.log('✅ DB Inicializada.');
     } catch (e) { console.error(e); } finally { release(); }
@@ -101,7 +102,10 @@ const authenticateAdmin = async (req, res, next) => {
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
     const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
-    await syncBrevoContact(email, nombre, LIST_ID_LEADS);
+    
+    // Notificar a Make (Lead Nuevo)
+    await notifyMake({ event: 'nuevo_lead', nombre, email, fecha: new Date() });
+    
     res.status(201).json({ message: 'Lead registrado', userId: result.rows[0].id });
 });
 
@@ -111,7 +115,10 @@ app.post('/api/registro', async (req, res) => {
         const hashed = await bcrypt.hash(password, 10);
         const result = await pool.query('INSERT INTO usuarios (nombre, email, password_hash, es_alumno_pago) VALUES ($1, $2, $3, FALSE) RETURNING id', [nombre, email, hashed]);
         const token = jwt.sign({ id: result.rows[0].id }, jwtSecret, { expiresIn: '7d' });
-        await syncBrevoContact(email, nombre, LIST_ID_LEADS);
+        
+        // Notificar a Make (Usuario Registrado)
+        await notifyMake({ event: 'registro_usuario', nombre, email, fecha: new Date() });
+
         res.status(201).json({ message: 'Cuenta creada', userId: result.rows[0].id, token, requierePago: true });
     } catch (e) { res.status(500).json({ error: 'Error registro' }); }
 });
@@ -164,7 +171,11 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
                 if (user_id) {
                     const planNombre = PLANES[plan_id]?.titulo || 'Plan Desconocido';
                     const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [user_id, planNombre]);
-                    if (result.rows.length > 0) await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
+                    
+                    // Notificar a Make (Pago Exitoso)
+                    if (result.rows.length > 0) {
+                        await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, metodo: 'MercadoPago' });
+                    }
                 }
             }
         }
@@ -196,7 +207,12 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
     if (data.status === 'COMPLETED') {
         const planNombre = PLANES[planId]?.titulo || 'Plan Internacional';
         const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [req.userId, planNombre]);
-        if (result.rows.length > 0) await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS);
+        
+        // Notificar a Make (Pago PayPal)
+        if (result.rows.length > 0) {
+            await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, metodo: 'PayPal' });
+        }
+        
         res.json({ status: 'COMPLETED' });
     } else { res.status(400).json({ error: 'Error PayPal' }); }
 });
@@ -211,16 +227,12 @@ app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, asy
     res.json({ leads: result.rows });
 });
 
-// NUEVO: ELIMINAR USUARIO (Lead o Activo)
+// ELIMINAR USUARIO
 app.delete('/api/admin/usuarios/:id', authenticateToken, authenticateAdmin, async (req, res) => {
     const userId = req.params.id;
     try {
-        // 1. Primero borramos el progreso del alumno (si lo tiene) para evitar errores de "Foreign Key"
         await pool.query('DELETE FROM progreso_alumnos WHERE usuario_id = $1', [userId]);
-        
-        // 2. Luego borramos el usuario de la tabla principal
         await pool.query('DELETE FROM usuarios WHERE id = $1', [userId]);
-        
         res.json({ message: 'Usuario eliminado permanentemente.' });
     } catch (error) {
         console.error(error);
@@ -231,7 +243,11 @@ app.delete('/api/admin/usuarios/:id', authenticateToken, authenticateAdmin, asyn
 app.post('/api/admin/activar-manual', authenticateToken, authenticateAdmin, async (req, res) => {
     const { userId, plan } = req.body;
     const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [userId, plan || 'Manual']);
-    if (result.rows.length > 0) { await syncBrevoContact(result.rows[0].email, result.rows[0].nombre, LIST_ID_ALUMNOS); res.json({ message: 'OK' }); }
+    if (result.rows.length > 0) { 
+        // Notificar a Make (Activación Manual)
+        await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: plan || 'Manual', metodo: 'Admin' });
+        res.json({ message: 'OK' }); 
+    }
     else { res.status(404).json({ error: 'Usuario no encontrado' }); }
 });
 app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, async (req, res) => {
@@ -270,7 +286,6 @@ app.get('/api/videos', authenticateToken, async (req, res) => {
     res.json({ videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })) });
 });
 
-// --- CAMBIO 2: Evitar error si ya existe el registro de progreso ---
 app.post('/api/progreso', authenticateToken, async (req, res) => {
     try {
         await pool.query(`
@@ -284,7 +299,6 @@ app.post('/api/progreso', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Error al guardar' });
     }
 });
-// ------------------------------------------------------------------
 
 app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
     const user = (await pool.query('SELECT es_alumno_pago, email FROM usuarios WHERE id = $1', [req.userId])).rows[0];
