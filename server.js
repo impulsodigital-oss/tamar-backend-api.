@@ -218,10 +218,13 @@ app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (
     [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, descripcion, nivel]);
     res.json({ message: 'OK' });
 });
+
+// *** RUTA AGREGADA: ELIMINAR CLASE (Vital para el Hub) ***
 app.delete('/api/admin/clases/:id', authenticateToken, authenticateAdmin, async (req, res) => {
     await pool.query('DELETE FROM clases_en_vivo WHERE id = $1', [req.params.id]);
     res.json({ message: 'OK' });
 });
+// *********************************************************
 
 // VIDEOS
 app.get('/api/admin/videos', authenticateToken, authenticateAdmin, async (req, res) => {
