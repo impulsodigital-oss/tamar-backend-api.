@@ -123,7 +123,7 @@ app.post('/api/crear-pago', authenticateToken, async (req, res) => {
             body: {
                 items: [{ id: planId, title: `Tamar - ${plan.titulo}`, quantity: 1, unit_price: plan.precio_ars, currency_id: 'ARS' }],
                 payer: { email: user.email, name: user.nombre },
-                back_urls: { success: 'https://tamarescuela.netlify.app/videos.html?status=success', failure: 'https://tamarescuela.netlify.app/videos.html?status=failure', pending: 'https://tamarescuela.netlify.app/videos.html?status=pending' },
+                back_urls: { success: 'https://educaciontamar.netlify.app/videos.html?status=success', failure: 'https://educaciontamar.netlify.app/videos.html?status=failure', pending: 'https://educaciontamar.netlify.app/videos.html?status=pending' },
                 auto_return: 'approved',
                 notification_url: 'https://tamar-backend-api-gqy9.onrender.com/api/webhook/mercadopago',
                 metadata: { user_id: userId, plan_id: planId, nivel_elegido: nivel } // Guardamos el nivel en metadata
@@ -165,7 +165,7 @@ app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
         body: JSON.stringify({
             intent: 'CAPTURE',
             purchase_units: [{ amount: { currency_code: 'USD', value: plan.precio_usd.toString() }, description: `${plan.titulo} (${nivel})`, custom_id: JSON.stringify({planId, nivel}) }], // Guardamos nivel en custom_id
-            application_context: { return_url: `https://tamarescuela.netlify.app/videos.html?status=paypal_success&plan=${planId}`, cancel_url: `https://tamarescuela.netlify.app/videos.html?status=failure` }
+            application_context: { return_url: `https://educaciontamar.netlify.app/videos.html?status=paypal_success&plan=${planId}`, cancel_url: `https://educaciontamar.netlify.app/videos.html?status=failure` }
         })
     });
     const order = await response.json();
@@ -263,3 +263,4 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
 });
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
+
