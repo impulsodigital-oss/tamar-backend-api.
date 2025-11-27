@@ -211,12 +211,14 @@ app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, asyn
     res.json({ message: 'OK' });
 });
 
-// --- RUTA MODIFICADA: GESTIÓN DE CLASES CON LINK DE GRABACIONES ---
+// --- RUTA MODIFICADA: GESTIÓN DE CLASES CON AUTO-REPARACIÓN ---
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
     
     try {
         // Auto-reparación de columnas para evitar errores en la DB
+        // IMPORTANTE: Agregada la reparación de 'materia' que faltaba
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
         
