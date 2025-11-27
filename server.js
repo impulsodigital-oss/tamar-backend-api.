@@ -7,6 +7,10 @@ const jwt = require('jsonwebtoken');
 const fetch = require('node-fetch');
 const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 
+// LIBRERÍAS DE OPTIMIZACIÓN
+const helmet = require('helmet');
+const compression = require('compression');
+
 const app = express();
 const port = process.env.PORT || 3000;
 const jwtSecret = process.env.JWT_SECRET;
@@ -39,6 +43,8 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
+app.use(helmet());
+app.use(compression());
 app.use(express.json());
 app.use(cors());
 
@@ -55,7 +61,6 @@ pool.connect(async (err, client, release) => {
 
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS nivel_educativo VARCHAR(50);`);
-        // NUEVO: Columna para guardar qué profesores eligió el alumno
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS profesores_elegidos TEXT;`);
 
         await client.query(`CREATE TABLE IF NOT EXISTS progreso_alumnos (id SERIAL PRIMARY KEY, usuario_id INT, video_id INT, fecha_completado TIMESTAMP DEFAULT NOW(), UNIQUE(usuario_id, video_id));`);
@@ -79,7 +84,7 @@ const authenticateAdmin = async (req, res, next) => {
     else res.status(403).json({ error: 'Acceso denegado' });
 };
 
-// --- RUTAS AUTH & PAGOS (Igual que antes) ---
+// --- RUTAS AUTH & PAGOS ---
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
     const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
@@ -183,9 +188,8 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
     } else { res.status(400).json({ error: 'Error PayPal' }); }
 });
 
-// --- SECCIÓN ADMIN MEJORADA (CON DATOS DE PROGRESO) ---
+// --- SECCIÓN ADMIN ---
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
-    // Esta consulta ahora devuelve también cuántos videos vio el alumno y el total de videos del sistema
     const result = await pool.query(`
         SELECT 
             u.id, u.nombre, u.email, u.plan_adquirido, u.nivel_educativo, u.profesores_elegidos,
@@ -198,7 +202,6 @@ app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, asy
     res.json({ alumnos: result.rows });
 });
 
-// NUEVA RUTA: Guardar profesores elegidos por Sofía
 app.post('/api/admin/guardar-profesores', authenticateToken, authenticateAdmin, async (req, res) => {
     const { userId, notas } = req.body;
     await pool.query('UPDATE usuarios SET profesores_elegidos = $1 WHERE id = $2', [notas, userId]);
@@ -223,7 +226,7 @@ app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, asyn
     res.json({ message: 'OK' });
 });
 
-// GESTIÓN DE CLASES CON NIVEL
+// --- GESTIÓN DE CLASES ---
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
     try {
@@ -232,7 +235,6 @@ app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (
         
         await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel_objetivo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, 
         [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, link_grabaciones, descripcion, nivel]);
-        
         res.json({ message: 'OK' });
     } catch (e) { console.error(e); res.status(500).json({ error: 'Error DB' }); }
 });
@@ -257,14 +259,20 @@ app.delete('/api/admin/videos/:id', authenticateToken, authenticateAdmin, async 
     res.json({ message: 'Eliminado' });
 });
 
-// ALUMNO
+// --- ALUMNO ---
 app.get('/api/videos', authenticateToken, async (req, res) => {
     const user = (await pool.query('SELECT es_alumno_pago, email, nivel_educativo FROM usuarios WHERE id = $1', [req.userId])).rows[0];
     if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido', requierePago: true });
     const videos = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
     const prog = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [req.userId]);
     const done = new Set(prog.rows.map(r => r.video_id));
-    res.json({ videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })), userLevel: user.nivel_educativo });
+    
+    // ENVIAMOS EL ID DEL USUARIO TAMBIÉN (IMPORTANTE PARA EL FILTRO INDIVIDUAL)
+    res.json({ 
+        videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })), 
+        userLevel: user.nivel_educativo,
+        userId: req.userId // <--- Agregado para filtrar clases por ID individual
+    });
 });
 
 app.post('/api/progreso', authenticateToken, async (req, res) => {
@@ -287,4 +295,3 @@ app.get('/api/magic/activar/:email', async (req, res) => {
 });
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
-
