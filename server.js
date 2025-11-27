@@ -20,7 +20,6 @@ const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com';
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL; 
 
 // --- CONFIGURACIÓN DE NEGOCIO (PRECIOS Y CUPONES) ---
-// Nota: Ajusté los precios ARS multiplicando USD * 1200 aprox. Confirmar con Sofía.
 const PLANES = {
     'basico': { titulo: 'Plan Básico', precio_ars: 46800, precio_usd: 39 },
     'kinder_mensual': { titulo: 'Kinder Mensual', precio_ars: 58800, precio_usd: 49 },
@@ -28,15 +27,14 @@ const PLANES = {
     'core': { titulo: 'Plan Core (3 Materias)', precio_ars: 70800, precio_usd: 59 },
     'selecto': { titulo: 'Plan Selecto (4 Materias)', precio_ars: 130800, precio_usd: 109 },
     'plus': { titulo: 'Plan Plus (10 Materias)', precio_ars: 154800, precio_usd: 129 },
-    'prestige': { titulo: 'Plan Prestige (10 Mat +)', precio_ars: 274800, precio_usd: 229 }, // Antes Completo
+    'prestige': { titulo: 'Plan Prestige (10 Mat +)', precio_ars: 274800, precio_usd: 229 }, 
     'certificacion': { titulo: 'Certificación Anual', precio_ars: 240000, precio_usd: 200 }
 };
 
-// CUPONES DE DESCUENTO (HARDCODED)
 const CUPONES = {
-    'SANTAFE': 0.15, // 15% de descuento
-    'HERMANOS': 0.10, // 10% de descuento
-    'BECA': 0.20 // 20% de descuento
+    'SANTAFE': 0.15, 
+    'HERMANOS': 0.10, 
+    'BECA': 0.20 
 };
 
 async function notifyMake(data) {
@@ -59,7 +57,6 @@ app.use(cors());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// ... (DB CONNECT Y MIDDLEWARES IGUAL QUE ANTES) ...
 pool.connect(async (err, client, release) => {
     if (err) return console.error('Error DB', err);
     try {
@@ -91,7 +88,7 @@ const authenticateAdmin = async (req, res, next) => {
     else res.status(403).json({ error: 'Acceso denegado' });
 };
 
-// ... (RUTAS AUTH IGUAL QUE ANTES) ...
+// RUTAS
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
     const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
@@ -121,18 +118,16 @@ app.post('/api/login', async (req, res) => {
     res.json({ message: 'Bienvenido', userId: user.id, nombre: user.nombre, nivel: user.nivel_educativo, token, requierePago: false });
 });
 
-// --- RUTA PAGO ACTUALIZADA CON CUPONES ---
 app.post('/api/crear-pago', authenticateToken, async (req, res) => {
-    const { planId, nivel, cupon } = req.body; // Recibimos cupón
+    const { planId, nivel, cupon } = req.body; 
     const plan = PLANES[planId] || PLANES['basico'];
     const userId = req.userId;
     
-    // Lógica de Descuento
     let precioFinal = plan.precio_ars;
     let tituloFinal = `Tamar - ${plan.titulo}`;
     
     if (cupon && CUPONES[cupon.toUpperCase()]) {
-        const descuento = CUPONES[cupon.toUpperCase()]; // ej: 0.15
+        const descuento = CUPONES[cupon.toUpperCase()]; 
         precioFinal = Math.round(precioFinal * (1 - descuento));
         tituloFinal += ` (${cupon} APPLIED)`;
     }
@@ -177,7 +172,6 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
     } catch (e) { res.sendStatus(500); }
 });
 
-// PAYPAL CON DESCUENTO
 app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
     const { planId, nivel, cupon } = req.body;
     const plan = PLANES[planId] || PLANES['basico'];
@@ -200,8 +194,6 @@ app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
     res.json(order);
 });
 
-// ... (RESTO DE LAS RUTAS CAPTURAR PAGO, ADMIN, VIDEOS IGUAL QUE ANTES) ...
-// Copia todo el bloque de abajo tal cual estaba en el mensaje anterior
 app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
     const { orderID, planId, nivel } = req.body;
     const accessToken = await getPayPalAccessToken();
@@ -261,6 +253,7 @@ app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS profesor VARCHAR(100);`);
+        
         await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel_objetivo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, 
         [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, link_grabaciones, descripcion, nivel]);
         res.json({ message: 'OK' });
@@ -287,12 +280,20 @@ app.delete('/api/admin/videos/:id', authenticateToken, authenticateAdmin, async 
 });
 
 app.get('/api/videos', authenticateToken, async (req, res) => {
-    const user = (await pool.query('SELECT es_alumno_pago, email, nivel_educativo FROM usuarios WHERE id = $1', [req.userId])).rows[0];
+    const user = (await pool.query('SELECT es_alumno_pago, email, nivel_educativo, plan_adquirido, fecha_registro FROM usuarios WHERE id = $1', [req.userId])).rows[0];
     if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido', requierePago: true });
+    
     const videos = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
     const prog = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [req.userId]);
     const done = new Set(prog.rows.map(r => r.video_id));
-    res.json({ videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })), userLevel: user.nivel_educativo, userId: req.userId });
+    
+    res.json({ 
+        videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })), 
+        userLevel: user.nivel_educativo, 
+        userId: req.userId,
+        plan: user.plan_adquirido,
+        fechaInicio: user.fecha_registro
+    });
 });
 
 app.post('/api/progreso', authenticateToken, async (req, res) => {
