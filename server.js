@@ -19,7 +19,7 @@ const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_API = process.env.PAYPAL_API_URL || 'https://api-m.paypal.com'; 
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL; 
 
-// --- CONFIGURACIÓN DE NEGOCIO (PRECIOS Y CUPONES) ---
+// --- CONFIGURACIÓN DE NEGOCIO ---
 const PLANES = {
     'basico': { titulo: 'Plan Básico', precio_ars: 46800, precio_usd: 39 },
     'kinder_mensual': { titulo: 'Kinder Mensual', precio_ars: 58800, precio_usd: 49 },
@@ -31,11 +31,7 @@ const PLANES = {
     'certificacion': { titulo: 'Certificación Anual', precio_ars: 240000, precio_usd: 200 }
 };
 
-const CUPONES = {
-    'SANTAFE': 0.15, 
-    'HERMANOS': 0.10, 
-    'BECA': 0.20 
-};
+const CUPONES = { 'SANTAFE': 0.15, 'HERMANOS': 0.10, 'BECA': 0.20 };
 
 async function notifyMake(data) {
     if (!MAKE_WEBHOOK_URL) return;
@@ -64,10 +60,17 @@ pool.connect(async (err, client, release) => {
         await client.query(`CREATE TABLE IF NOT EXISTS clases_en_vivo (id SERIAL PRIMARY KEY, titulo VARCHAR(255), materia VARCHAR(100), profesor VARCHAR(100), fecha_hora TIMESTAMP, link_zoom TEXT, link_recursos TEXT, descripcion TEXT);`);
         await client.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`); 
         await client.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
+        
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS nivel_educativo VARCHAR(50);`);
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS profesores_elegidos TEXT;`);
+        
         await client.query(`CREATE TABLE IF NOT EXISTS progreso_alumnos (id SERIAL PRIMARY KEY, usuario_id INT, video_id INT, fecha_completado TIMESTAMP DEFAULT NOW(), UNIQUE(usuario_id, video_id));`);
+        
+        // NUEVO: TABLA PARA EL MURO DE NOVEDADES
+        await client.query(`CREATE TABLE IF NOT EXISTS config (clave VARCHAR(50) PRIMARY KEY, valor TEXT);`);
+        await client.query(`INSERT INTO config (clave, valor) VALUES ('novedades', '¡Bienvenidos a la comunidad Tamar!') ON CONFLICT (clave) DO NOTHING;`);
+        
         console.log('✅ DB Inicializada.');
     } catch (e) { console.error(e); } finally { release(); }
 });
@@ -88,7 +91,7 @@ const authenticateAdmin = async (req, res, next) => {
     else res.status(403).json({ error: 'Acceso denegado' });
 };
 
-// RUTAS
+// --- RUTAS PRINCIPALES ---
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
     const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
@@ -118,22 +121,18 @@ app.post('/api/login', async (req, res) => {
     res.json({ message: 'Bienvenido', userId: user.id, nombre: user.nombre, nivel: user.nivel_educativo, token, requierePago: false });
 });
 
+// --- PAGOS ---
 app.post('/api/crear-pago', authenticateToken, async (req, res) => {
     const { planId, nivel, cupon } = req.body; 
     const plan = PLANES[planId] || PLANES['basico'];
     const userId = req.userId;
-    
     let precioFinal = plan.precio_ars;
     let tituloFinal = `Tamar - ${plan.titulo}`;
-    
     if (cupon && CUPONES[cupon.toUpperCase()]) {
-        const descuento = CUPONES[cupon.toUpperCase()]; 
-        precioFinal = Math.round(precioFinal * (1 - descuento));
-        tituloFinal += ` (${cupon} APPLIED)`;
+        precioFinal = Math.round(precioFinal * (1 - CUPONES[cupon.toUpperCase()]));
+        tituloFinal += ` (${cupon})`;
     }
-
     const user = (await pool.query('SELECT email, nombre FROM usuarios WHERE id = $1', [userId])).rows[0];
-
     try {
         const preference = new Preference(client);
         const result = await preference.create({
@@ -162,9 +161,7 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
                 if (user_id) {
                     const planNombre = PLANES[plan_id]?.titulo || 'Plan Desconocido';
                     const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2, nivel_educativo = $3 WHERE id = $1 RETURNING email, nombre', [user_id, planNombre, nivel_elegido]);
-                    if (result.rows.length > 0) {
-                        await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, nivel: nivel_elegido });
-                    }
+                    if (result.rows.length > 0) { await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, nivel: nivel_elegido }); }
                 }
             }
         }
@@ -175,12 +172,8 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
 app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
     const { planId, nivel, cupon } = req.body;
     const plan = PLANES[planId] || PLANES['basico'];
-    
     let precioFinal = plan.precio_usd;
-    if (cupon && CUPONES[cupon.toUpperCase()]) {
-        precioFinal = Math.round(precioFinal * (1 - CUPONES[cupon.toUpperCase()]));
-    }
-
+    if (cupon && CUPONES[cupon.toUpperCase()]) { precioFinal = Math.round(precioFinal * (1 - CUPONES[cupon.toUpperCase()])); }
     const accessToken = await getPayPalAccessToken();
     const response = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
@@ -202,83 +195,28 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
     if (data.status === 'COMPLETED') {
         const planNombre = PLANES[planId]?.titulo || 'Plan Internacional';
         const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2, nivel_educativo = $3 WHERE id = $1 RETURNING email, nombre', [req.userId, planNombre, nivel || 'General']);
-        if (result.rows.length > 0) {
-            await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, metodo: 'PayPal' });
-        }
+        if (result.rows.length > 0) { await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, metodo: 'PayPal' }); }
         res.json({ status: 'COMPLETED' });
     } else { res.status(400).json({ error: 'Error PayPal' }); }
 });
 
+// --- ADMIN ---
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
-    const result = await pool.query(`
-        SELECT 
-            u.id, u.nombre, u.email, u.plan_adquirido, u.nivel_educativo, u.profesores_elegidos, u.fecha_registro,
-            (SELECT COUNT(*) FROM progreso_alumnos p WHERE p.usuario_id = u.id) as videos_vistos,
-            (SELECT COUNT(*) FROM videos) as total_videos
-        FROM usuarios u 
-        WHERE u.es_alumno_pago = TRUE 
-        ORDER BY u.id DESC
-    `);
+    const result = await pool.query(`SELECT u.id, u.nombre, u.email, u.plan_adquirido, u.nivel_educativo, u.profesores_elegidos, u.fecha_registro, (SELECT COUNT(*) FROM progreso_alumnos p WHERE p.usuario_id = u.id) as videos_vistos, (SELECT COUNT(*) FROM videos) as total_videos FROM usuarios u WHERE u.es_alumno_pago = TRUE ORDER BY u.id DESC`);
     res.json({ alumnos: result.rows });
 });
-
 app.post('/api/admin/guardar-profesores', authenticateToken, authenticateAdmin, async (req, res) => {
     const { userId, notas } = req.body;
     await pool.query('UPDATE usuarios SET profesores_elegidos = $1 WHERE id = $2', [notas, userId]);
     res.json({ message: 'OK' });
 });
-
-app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, async (req, res) => {
-    const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC');
-    res.json({ leads: result.rows });
-});
-app.delete('/api/admin/usuarios/:id', authenticateToken, authenticateAdmin, async (req, res) => {
-    try { await pool.query('DELETE FROM progreso_alumnos WHERE usuario_id = $1', [req.params.id]); await pool.query('DELETE FROM usuarios WHERE id = $1', [req.params.id]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({error:'Error'}); }
-});
-app.post('/api/admin/activar-manual', authenticateToken, authenticateAdmin, async (req, res) => {
-    const { userId, plan } = req.body;
-    const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [userId, plan || 'Manual']);
-    if (result.rows.length > 0) res.json({ message: 'OK' }); else res.status(404).json({ error: 'No encontrado' });
-});
-app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, async (req, res) => {
-    const hashedPassword = await bcrypt.hash(req.body.newPassword, 10);
-    await pool.query('UPDATE usuarios SET password_hash = $1 WHERE email = $2', [hashedPassword, req.body.email]);
+app.post('/api/admin/novedades', authenticateToken, authenticateAdmin, async (req, res) => {
+    const { texto } = req.body;
+    await pool.query("UPDATE config SET valor = $1 WHERE clave = 'novedades'", [texto]);
     res.json({ message: 'OK' });
 });
 
-app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
-    const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
-    try {
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS profesor VARCHAR(100);`);
-        
-        await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel_objetivo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, 
-        [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, link_grabaciones, descripcion, nivel]);
-        res.json({ message: 'OK' });
-    } catch (e) { console.error(e); res.status(500).json({ error: 'Error DB' }); }
-});
-
-app.delete('/api/admin/clases/:id', authenticateToken, authenticateAdmin, async (req, res) => {
-    await pool.query('DELETE FROM clases_en_vivo WHERE id = $1', [req.params.id]);
-    res.json({ message: 'OK' });
-});
-
-app.get('/api/admin/videos', authenticateToken, authenticateAdmin, async (req, res) => {
-    const result = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
-    res.json({ videos: result.rows });
-});
-app.post('/api/admin/videos', authenticateToken, authenticateAdmin, async (req, res) => {
-    const { titulo, corto, modulo, orden, url, desc } = req.body;
-    await pool.query('INSERT INTO videos (titulo_completo, titulo_corto, modulo, orden, url_video, descripcion) VALUES ($1, $2, $3, $4, $5, $6)', [titulo, corto, modulo, orden, url, desc]);
-    res.json({ message: 'OK' });
-});
-app.delete('/api/admin/videos/:id', authenticateToken, authenticateAdmin, async (req, res) => {
-    await pool.query('DELETE FROM videos WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Eliminado' });
-});
-
+// --- ALUMNO (CON NOVEDADES) ---
 app.get('/api/videos', authenticateToken, async (req, res) => {
     const user = (await pool.query('SELECT es_alumno_pago, email, nivel_educativo, plan_adquirido, fecha_registro FROM usuarios WHERE id = $1', [req.userId])).rows[0];
     if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido', requierePago: true });
@@ -287,12 +225,17 @@ app.get('/api/videos', authenticateToken, async (req, res) => {
     const prog = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [req.userId]);
     const done = new Set(prog.rows.map(r => r.video_id));
     
+    // Obtenemos el mensaje de novedades
+    const novedadesData = await pool.query("SELECT valor FROM config WHERE clave = 'novedades'");
+    const novedades = novedadesData.rows.length > 0 ? novedadesData.rows[0].valor : '';
+
     res.json({ 
         videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })), 
         userLevel: user.nivel_educativo, 
         userId: req.userId,
         plan: user.plan_adquirido,
-        fechaInicio: user.fecha_registro
+        fechaInicio: user.fecha_registro,
+        novedades: novedades // <--- DATO NUEVO PARA EL FRONTEND
     });
 });
 
@@ -301,18 +244,29 @@ app.post('/api/progreso', authenticateToken, async (req, res) => {
     res.json({ message: 'OK' });
 });
 
-app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
-    const result = await pool.query('SELECT * FROM clases_en_vivo ORDER BY fecha_hora ASC');
-    res.json({ clases: result.rows });
+// ... (RESTO DE RUTAS IGUALES) ...
+app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
+    const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
+    try {
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS profesor VARCHAR(100);`);
+        await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel_objetivo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, 
+        [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, link_grabaciones, descripcion, nivel]);
+        res.json({ message: 'OK' });
+    } catch (e) { console.error(e); res.status(500).json({ error: 'Error DB' }); }
 });
-
-app.get('/api/setup/update-db-planes', async (req, res) => {
-    await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
-    res.send('✅ DB Updated');
-});
-app.get('/api/magic/activar/:email', async (req, res) => {
-    const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id', [req.params.email]);
-    res.send(result.rows.length > 0 ? '✅ Activado' : '❌ No encontrado');
-});
+app.delete('/api/admin/clases/:id', authenticateToken, authenticateAdmin, async (req, res) => { await pool.query('DELETE FROM clases_en_vivo WHERE id = $1', [req.params.id]); res.json({ message: 'OK' }); });
+app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => { const result = await pool.query('SELECT * FROM clases_en_vivo ORDER BY fecha_hora ASC'); res.json({ clases: result.rows }); });
+app.get('/api/admin/videos', authenticateToken, authenticateAdmin, async (req, res) => { const result = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC'); res.json({ videos: result.rows }); });
+app.post('/api/admin/videos', authenticateToken, authenticateAdmin, async (req, res) => { const { titulo, corto, modulo, orden, url, desc } = req.body; await pool.query('INSERT INTO videos (titulo_completo, titulo_corto, modulo, orden, url_video, descripcion) VALUES ($1, $2, $3, $4, $5, $6)', [titulo, corto, modulo, orden, url, desc]); res.json({ message: 'OK' }); });
+app.delete('/api/admin/videos/:id', authenticateToken, authenticateAdmin, async (req, res) => { await pool.query('DELETE FROM videos WHERE id = $1', [req.params.id]); res.json({ message: 'Eliminado' }); });
+app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, async (req, res) => { const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC'); res.json({ leads: result.rows }); });
+app.delete('/api/admin/usuarios/:id', authenticateToken, authenticateAdmin, async (req, res) => { try { await pool.query('DELETE FROM progreso_alumnos WHERE usuario_id = $1', [req.params.id]); await pool.query('DELETE FROM usuarios WHERE id = $1', [req.params.id]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({error:'Error'}); } });
+app.post('/api/admin/activar-manual', authenticateToken, authenticateAdmin, async (req, res) => { const { userId, plan } = req.body; await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2 WHERE id = $1 RETURNING email, nombre', [userId, plan || 'Manual']); res.json({ message: 'OK' }); });
+app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, async (req, res) => { const hashedPassword = await bcrypt.hash(req.body.newPassword, 10); await pool.query('UPDATE usuarios SET password_hash = $1 WHERE email = $2', [hashedPassword, req.body.email]); res.json({ message: 'OK' }); });
+app.get('/api/setup/update-db-planes', async (req, res) => { await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`); res.send('✅ DB Updated'); });
+app.get('/api/magic/activar/:email', async (req, res) => { const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id', [req.params.email]); res.send(result.rows.length > 0 ? '✅ Activado' : '❌ No encontrado'); });
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
