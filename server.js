@@ -49,7 +49,8 @@ pool.connect(async (err, client, release) => {
     try {
         await client.query(`CREATE TABLE IF NOT EXISTS videos (id SERIAL PRIMARY KEY, titulo_completo VARCHAR(255), titulo_corto VARCHAR(100), modulo INT, orden INT, url_video TEXT, descripcion TEXT);`);
         
-        // ACTUALIZACIÓN: Agregamos nivel_objetivo a las clases
+        // Esta línea crea la tabla si NO existe, pero si ya existe no agrega columnas nuevas automáticamente.
+        // Por eso hacemos la auto-reparación más abajo en la ruta de creación.
         await client.query(`CREATE TABLE IF NOT EXISTS clases_en_vivo (id SERIAL PRIMARY KEY, titulo VARCHAR(255), materia VARCHAR(100), profesor VARCHAR(100), fecha_hora TIMESTAMP, link_zoom TEXT, link_recursos TEXT, descripcion TEXT);`);
         await client.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`); 
 
@@ -211,14 +212,15 @@ app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, asyn
     res.json({ message: 'OK' });
 });
 
-// --- RUTA MODIFICADA: GESTIÓN DE CLASES CON AUTO-REPARACIÓN ---
+// --- RUTA MODIFICADA: GESTIÓN DE CLASES CON AUTO-REPARACIÓN COMPLETA ---
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
     
     try {
         // Auto-reparación de columnas para evitar errores en la DB
-        // IMPORTANTE: Agregada la reparación de 'materia' que faltaba
+        // IMPORTANTE: Ahora aseguramos que TODAS las columnas existan
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_recursos TEXT;`);  // <-- AGREGADO
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
         
