@@ -211,20 +211,30 @@ app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, asyn
     res.json({ message: 'OK' });
 });
 
-// GESTIÓN DE CLASES CON NIVEL
+// --- RUTA MODIFICADA: GESTIÓN DE CLASES CON LINK DE GRABACIONES ---
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
-    const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, descripcion, nivel } = req.body;
-    await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, descripcion, nivel_objetivo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, 
-    [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, descripcion, nivel]);
-    res.json({ message: 'OK' });
+    const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
+    
+    try {
+        // Auto-reparación de columnas para evitar errores en la DB
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
+        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
+        
+        await pool.query(`INSERT INTO clases_en_vivo (titulo, materia, profesor, fecha_hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel_objetivo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, 
+        [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, link_grabaciones, descripcion, nivel]);
+        
+        res.json({ message: 'OK' });
+    } catch (e) {
+        console.error("Error al crear clase:", e);
+        res.status(500).json({ error: 'Error DB' });
+    }
 });
+// -----------------------------------------------------------------
 
-// *** RUTA AGREGADA: ELIMINAR CLASE (Vital para el Hub) ***
 app.delete('/api/admin/clases/:id', authenticateToken, authenticateAdmin, async (req, res) => {
     await pool.query('DELETE FROM clases_en_vivo WHERE id = $1', [req.params.id]);
     res.json({ message: 'OK' });
 });
-// *********************************************************
 
 // VIDEOS
 app.get('/api/admin/videos', authenticateToken, authenticateAdmin, async (req, res) => {
@@ -263,4 +273,3 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
 });
 
 app.listen(port, () => console.log(`Server running on port ${port}`));
-
