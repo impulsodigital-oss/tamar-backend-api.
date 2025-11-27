@@ -49,14 +49,14 @@ pool.connect(async (err, client, release) => {
     try {
         await client.query(`CREATE TABLE IF NOT EXISTS videos (id SERIAL PRIMARY KEY, titulo_completo VARCHAR(255), titulo_corto VARCHAR(100), modulo INT, orden INT, url_video TEXT, descripcion TEXT);`);
         
-        // Esta línea crea la tabla si NO existe, pero si ya existe no agrega columnas nuevas automáticamente.
-        // Por eso hacemos la auto-reparación más abajo en la ruta de creación.
         await client.query(`CREATE TABLE IF NOT EXISTS clases_en_vivo (id SERIAL PRIMARY KEY, titulo VARCHAR(255), materia VARCHAR(100), profesor VARCHAR(100), fecha_hora TIMESTAMP, link_zoom TEXT, link_recursos TEXT, descripcion TEXT);`);
         await client.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`); 
+        await client.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
 
-        // ACTUALIZACIÓN: Agregamos nivel_educativo a los usuarios
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
         await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS nivel_educativo VARCHAR(50);`);
+        // NUEVO: Columna para guardar qué profesores eligió el alumno
+        await client.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS profesores_elegidos TEXT;`);
 
         await client.query(`CREATE TABLE IF NOT EXISTS progreso_alumnos (id SERIAL PRIMARY KEY, usuario_id INT, video_id INT, fecha_completado TIMESTAMP DEFAULT NOW(), UNIQUE(usuario_id, video_id));`);
         console.log('✅ DB Inicializada.');
@@ -79,7 +79,7 @@ const authenticateAdmin = async (req, res, next) => {
     else res.status(403).json({ error: 'Acceso denegado' });
 };
 
-// RUTAS
+// --- RUTAS AUTH & PAGOS (Igual que antes) ---
 app.post('/api/leads', async (req, res) => {
     const { nombre, email } = req.body;
     const result = await pool.query('INSERT INTO usuarios (nombre, email, es_alumno_pago) VALUES ($1, $2, FALSE) ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre RETURNING id', [nombre, email]);
@@ -103,21 +103,17 @@ app.post('/api/login', async (req, res) => {
     const result = await pool.query('SELECT id, nombre, password_hash, es_alumno_pago, email, nivel_educativo FROM usuarios WHERE email = $1', [email]);
     const user = result.rows[0];
     if (!user || !await bcrypt.compare(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales incorrectas' });
-    
     const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: '7d' });
     const isVIP = (user.email === 'admin@tamar.com' || user.id == 1);
-    
-    // Devolvemos el nivel educativo en el login para usarlo en el frontend
     if (user.es_alumno_pago !== true && !isVIP) return res.json({ message: 'Pago pendiente', userId: user.id, nombre: user.nombre, token, requierePago: true });
     res.json({ message: 'Bienvenido', userId: user.id, nombre: user.nombre, nivel: user.nivel_educativo, token, requierePago: false });
 });
 
 app.post('/api/crear-pago', authenticateToken, async (req, res) => {
-    const { planId, nivel } = req.body; // Recibimos el nivel
+    const { planId, nivel } = req.body; 
     const plan = PLANES[planId] || PLANES['basico'];
     const userId = req.userId;
     const user = (await pool.query('SELECT email, nombre FROM usuarios WHERE id = $1', [userId])).rows[0];
-
     try {
         const preference = new Preference(client);
         const result = await preference.create({
@@ -127,7 +123,7 @@ app.post('/api/crear-pago', authenticateToken, async (req, res) => {
                 back_urls: { success: 'https://educaciontamar.netlify.app/videos.html?status=success', failure: 'https://educaciontamar.netlify.app/videos.html?status=failure', pending: 'https://educaciontamar.netlify.app/videos.html?status=pending' },
                 auto_return: 'approved',
                 notification_url: 'https://tamar-backend-api-gqy9.onrender.com/api/webhook/mercadopago',
-                metadata: { user_id: userId, plan_id: planId, nivel_elegido: nivel } // Guardamos el nivel en metadata
+                metadata: { user_id: userId, plan_id: planId, nivel_elegido: nivel } 
             }
         });
         res.json({ id: result.id, init_point: result.init_point });
@@ -145,7 +141,6 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
                 const { user_id, plan_id, nivel_elegido } = info.metadata;
                 if (user_id) {
                     const planNombre = PLANES[plan_id]?.titulo || 'Plan Desconocido';
-                    // Guardamos el NIVEL EDUCATIVO
                     const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2, nivel_educativo = $3 WHERE id = $1 RETURNING email, nombre', [user_id, planNombre, nivel_elegido]);
                     if (result.rows.length > 0) {
                         await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, nivel: nivel_elegido });
@@ -158,14 +153,14 @@ app.post('/api/webhook/mercadopago', async (req, res) => {
 });
 
 app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
-    const { planId, nivel } = req.body; // Recibimos el nivel
+    const { planId, nivel } = req.body;
     const plan = PLANES[planId] || PLANES['basico'];
     const accessToken = await getPayPalAccessToken();
     const response = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
             intent: 'CAPTURE',
-            purchase_units: [{ amount: { currency_code: 'USD', value: plan.precio_usd.toString() }, description: `${plan.titulo} (${nivel})`, custom_id: JSON.stringify({planId, nivel}) }], // Guardamos nivel en custom_id
+            purchase_units: [{ amount: { currency_code: 'USD', value: plan.precio_usd.toString() }, description: `${plan.titulo} (${nivel})`, custom_id: JSON.stringify({planId, nivel}) }],
             application_context: { return_url: `https://educaciontamar.netlify.app/videos.html?status=paypal_success&plan=${planId}`, cancel_url: `https://educaciontamar.netlify.app/videos.html?status=failure` }
         })
     });
@@ -174,13 +169,12 @@ app.post('/api/crear-pago-paypal', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
-    const { orderID, planId, nivel } = req.body; // Asumimos que el frontend pasa el nivel o lo recuperamos del custom_id si fuera necesario
+    const { orderID, planId, nivel } = req.body;
     const accessToken = await getPayPalAccessToken();
     const response = await fetch(`${PAYPAL_API}/v2/checkout/orders/${orderID}/capture`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } });
     const data = await response.json();
     if (data.status === 'COMPLETED') {
         const planNombre = PLANES[planId]?.titulo || 'Plan Internacional';
-        // Guardamos el NIVEL
         const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE, plan_adquirido = $2, nivel_educativo = $3 WHERE id = $1 RETURNING email, nombre', [req.userId, planNombre, nivel || 'General']);
         if (result.rows.length > 0) {
             await notifyMake({ event: 'pago_exitoso', nombre: result.rows[0].nombre, email: result.rows[0].email, plan: planNombre, metodo: 'PayPal' });
@@ -189,11 +183,28 @@ app.post('/api/capturar-pago-paypal', authenticateToken, async (req, res) => {
     } else { res.status(400).json({ error: 'Error PayPal' }); }
 });
 
-// ADMIN
+// --- SECCIÓN ADMIN MEJORADA (CON DATOS DE PROGRESO) ---
 app.get('/api/admin/usuarios-activos', authenticateToken, authenticateAdmin, async (req, res) => {
-    const result = await pool.query('SELECT id, nombre, email, plan_adquirido, nivel_educativo FROM usuarios WHERE es_alumno_pago = TRUE ORDER BY id DESC');
+    // Esta consulta ahora devuelve también cuántos videos vio el alumno y el total de videos del sistema
+    const result = await pool.query(`
+        SELECT 
+            u.id, u.nombre, u.email, u.plan_adquirido, u.nivel_educativo, u.profesores_elegidos,
+            (SELECT COUNT(*) FROM progreso_alumnos p WHERE p.usuario_id = u.id) as videos_vistos,
+            (SELECT COUNT(*) FROM videos) as total_videos
+        FROM usuarios u 
+        WHERE u.es_alumno_pago = TRUE 
+        ORDER BY u.id DESC
+    `);
     res.json({ alumnos: result.rows });
 });
+
+// NUEVA RUTA: Guardar profesores elegidos por Sofía
+app.post('/api/admin/guardar-profesores', authenticateToken, authenticateAdmin, async (req, res) => {
+    const { userId, notas } = req.body;
+    await pool.query('UPDATE usuarios SET profesores_elegidos = $1 WHERE id = $2', [notas, userId]);
+    res.json({ message: 'OK' });
+});
+
 app.get('/api/admin/leads-pendientes', authenticateToken, authenticateAdmin, async (req, res) => {
     const result = await pool.query('SELECT id, nombre, email, fecha_registro FROM usuarios WHERE es_alumno_pago = FALSE ORDER BY id DESC');
     res.json({ leads: result.rows });
@@ -212,15 +223,10 @@ app.post('/api/admin/reset-password', authenticateToken, authenticateAdmin, asyn
     res.json({ message: 'OK' });
 });
 
-// --- RUTA MODIFICADA: GESTIÓN DE CLASES CON AUTO-REPARACIÓN COMPLETA ---
+// GESTIÓN DE CLASES CON NIVEL
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
-    
     try {
-        // Auto-reparación de columnas para evitar errores en la DB
-        // IMPORTANTE: Ahora aseguramos que TODAS las columnas existan
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS materia VARCHAR(100);`);
-        await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_recursos TEXT;`);  // <-- AGREGADO
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS link_grabaciones TEXT;`);
         await pool.query(`ALTER TABLE clases_en_vivo ADD COLUMN IF NOT EXISTS nivel_objetivo VARCHAR(50);`);
         
@@ -228,12 +234,8 @@ app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (
         [titulo, materia, profesor, `${fecha}T${hora}:00`, link_zoom, link_recursos, link_grabaciones, descripcion, nivel]);
         
         res.json({ message: 'OK' });
-    } catch (e) {
-        console.error("Error al crear clase:", e);
-        res.status(500).json({ error: 'Error DB' });
-    }
+    } catch (e) { console.error(e); res.status(500).json({ error: 'Error DB' }); }
 });
-// -----------------------------------------------------------------
 
 app.delete('/api/admin/clases/:id', authenticateToken, authenticateAdmin, async (req, res) => {
     await pool.query('DELETE FROM clases_en_vivo WHERE id = $1', [req.params.id]);
@@ -255,14 +257,13 @@ app.delete('/api/admin/videos/:id', authenticateToken, authenticateAdmin, async 
     res.json({ message: 'Eliminado' });
 });
 
-// ALUMNO (Incluye datos del usuario para filtrar)
+// ALUMNO
 app.get('/api/videos', authenticateToken, async (req, res) => {
     const user = (await pool.query('SELECT es_alumno_pago, email, nivel_educativo FROM usuarios WHERE id = $1', [req.userId])).rows[0];
     if (!user.es_alumno_pago && user.email !== 'admin@tamar.com' && req.userId != 1) return res.status(403).json({ error: 'Pago requerido', requierePago: true });
     const videos = await pool.query('SELECT * FROM videos ORDER BY modulo, orden ASC');
     const prog = await pool.query('SELECT video_id FROM progreso_alumnos WHERE usuario_id = $1', [req.userId]);
     const done = new Set(prog.rows.map(r => r.video_id));
-    // Devolvemos también el nivel del usuario para que el front sepa qué filtrar
     res.json({ videos: videos.rows.map(v => ({ ...v, completado: done.has(v.id) })), userLevel: user.nivel_educativo });
 });
 
@@ -276,4 +277,14 @@ app.get('/api/clases-en-vivo', authenticateToken, async (req, res) => {
     res.json({ clases: result.rows });
 });
 
+app.get('/api/setup/update-db-planes', async (req, res) => {
+    await pool.query(`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS plan_adquirido VARCHAR(100);`);
+    res.send('✅ DB Updated');
+});
+app.get('/api/magic/activar/:email', async (req, res) => {
+    const result = await pool.query('UPDATE usuarios SET es_alumno_pago = TRUE WHERE email = $1 RETURNING id', [req.params.email]);
+    res.send(result.rows.length > 0 ? '✅ Activado' : '❌ No encontrado');
+});
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
+
