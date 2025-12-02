@@ -9,6 +9,9 @@ const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 const helmet = require('helmet');
 const compression = require('compression');
 
+// --- NUEVO: Librería para limitar peticiones (Freno de mano) ---
+const rateLimit = require('express-rate-limit');
+
 const app = express();
 const port = process.env.PORT || 3000;
 const jwtSecret = process.env.JWT_SECRET;
@@ -46,10 +49,66 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
+// ==========================================
+//      INICIO DE BLOQUE DE SEGURIDAD
+// ==========================================
+
+// 1. HELMET: Protege cabeceras HTTP
 app.use(helmet());
 app.use(compression());
+
+// 2. CORS RESTRICTIVO: Solo permite peticiones desde TUS dominios
+const whitelist = [
+    'https://educaciontamar.netlify.app', // Tu frontend actual
+    'https://tamarescuela.netlify.app',   // Frontend alternativo
+    'http://localhost:5500',            
+    'http://127.0.0.1:5500',            
+    'http://localhost:3000'             
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Permitir solicitudes sin origen (como Postman local o apps móviles) o si está en la whitelist
+    if (!origin || whitelist.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log("Bloqueado por CORS:", origin);
+      callback(new Error('Bloqueado por CORS: Tu origen no está autorizado.'));
+    }
+  },
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
+
+app.use(cors(corsOptions));
+
+// 3. RATE LIMITING: Freno contra ataques de fuerza bruta
+// Limitador general para toda la API (200 peticiones cada 15 min)
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, 
+  max: 200, 
+  standardHeaders: true, 
+  legacyHeaders: false,
+  message: { error: 'Demasiadas peticiones, por favor intenta más tarde.' }
+});
+app.use('/api/', generalLimiter);
+
+// Limitador estricto para LOGIN y REGISTRO (15 intentos cada 15 min)
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 15, 
+    message: { error: 'Demasiados intentos de acceso. Espera 15 minutos.' }
+});
+app.use('/api/login', authLimiter);
+app.use('/api/registro', authLimiter);
+
+// ==========================================
+//      FIN DE BLOQUE DE SEGURIDAD
+// ==========================================
+
 app.use(express.json());
-app.use(cors());
+// app.use(cors());  <-- ELIMINADO PORQUE YA LO CONFIGURAMOS ARRIBA CON SEGURIDAD
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
@@ -67,7 +126,7 @@ pool.connect(async (err, client, release) => {
         
         await client.query(`CREATE TABLE IF NOT EXISTS progreso_alumnos (id SERIAL PRIMARY KEY, usuario_id INT, video_id INT, fecha_completado TIMESTAMP DEFAULT NOW(), UNIQUE(usuario_id, video_id));`);
         
-        // NUEVO: TABLA PARA EL MURO DE NOVEDADES
+        // TABLA PARA EL MURO DE NOVEDADES
         await client.query(`CREATE TABLE IF NOT EXISTS config (clave VARCHAR(50) PRIMARY KEY, valor TEXT);`);
         await client.query(`INSERT INTO config (clave, valor) VALUES ('novedades', '¡Bienvenidos a la comunidad Tamar!') ON CONFLICT (clave) DO NOTHING;`);
         
@@ -235,7 +294,7 @@ app.get('/api/videos', authenticateToken, async (req, res) => {
         userId: req.userId,
         plan: user.plan_adquirido,
         fechaInicio: user.fecha_registro,
-        novedades: novedades // <--- DATO NUEVO PARA EL FRONTEND
+        novedades: novedades 
     });
 });
 
@@ -244,7 +303,6 @@ app.post('/api/progreso', authenticateToken, async (req, res) => {
     res.json({ message: 'OK' });
 });
 
-// ... (RESTO DE RUTAS IGUALES) ...
 app.post('/api/admin/nueva-clase', authenticateToken, authenticateAdmin, async (req, res) => {
     const { titulo, materia, profesor, fecha, hora, link_zoom, link_recursos, link_grabaciones, descripcion, nivel } = req.body;
     try {
