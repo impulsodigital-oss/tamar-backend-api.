@@ -20,6 +20,7 @@
     "jsonwebtoken": "^9.0.2",
     "mercadopago": "^2.0.0",
     "node-fetch": "^2.6.1",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "express-rate-limit": "^7.1.5"
   }
 }
